@@ -1,11 +1,19 @@
 import os
 import json
+import asyncio
+
 import gspread
 from google.oauth2.service_account import Credentials
-from telegram import Update, ReplyKeyboardMarkup
+
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
+    CallbackQueryHandler,
     MessageHandler,
     ContextTypes,
     filters,
@@ -13,46 +21,44 @@ from telegram.ext import (
 
 # ================== НАСТРОЙКИ ==================
 
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-REGISTRY_SHEET_URL = os.environ["REGISTRY_SHEET_URL"]
-GOOGLE_CREDENTIALS = json.loads(os.environ["GOOGLE_CREDENTIALS"])
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+REGISTRY_SHEET_URL = os.getenv("REGISTRY_SHEET_URL")
+GOOGLE_CREDENTIALS = os.getenv("GOOGLE_CREDENTIALS")
 
-SCOPES = [
+# ================== GOOGLE SHEETS ==================
+
+creds_dict = json.loads(GOOGLE_CREDENTIALS)
+
+scopes = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
 
-# ================== GOOGLE ==================
-
-creds = Credentials.from_service_account_info(
-    GOOGLE_CREDENTIALS, scopes=SCOPES
-)
+creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
 gc = gspread.authorize(creds)
-
-# ================== КЛАВИАТУРА ==================
-
-MAIN_KEYBOARD = ReplyKeyboardMarkup(
-    [["📦 Посчитать мою сумму к оплате доставки до админа"]],
-    resize_keyboard=True
-)
 
 # ================== /start ==================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📦 Посчитать мою сумму", callback_data="calc")]
+    ])
     await update.message.reply_text(
         "Здравствуйте!\n\n"
         "Я помогу посчитать сумму к оплате.\n"
         "Нажмите кнопку ниже 👇",
-        reply_markup=MAIN_KEYBOARD,
+        reply_markup=keyboard
     )
-    context.user_data.clear()
 
 # ================== КНОПКА ==================
 
-async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if "посчитать" in update.message.text.lower():
+async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "calc":
         context.user_data["waiting_username"] = True
-        await update.message.reply_text(
+        await query.message.reply_text(
             "Пожалуйста, введите ваш Telegram-юзернейм\n"
             "(например: @anna)"
         )
@@ -71,15 +77,17 @@ async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         sheet = gc.open_by_url(REGISTRY_SHEET_URL).sheet1
-        rows = sheet.get_all_records()
+        raw_rows = sheet.get_all_values()[1:]  # без заголовков
     except Exception:
-        await update.message.reply_text("Ошибка доступа к таблице 🥲")
+        await update.message.reply_text("Ошибка доступа к таблице 😢")
         return
 
-    user_rows = [
-        r for r in rows
-        if str(r.get("Ник в тг", "")).strip().lower() == username
-    ]
+    # --- поиск по колонке C (ник в тг) ---
+    user_rows = []
+    for r in raw_rows:
+        tg_nick = str(r[2]).strip().lower()  # C
+        if tg_nick == username:
+            user_rows.append(r)
 
     if not user_rows:
         await update.message.reply_text(
@@ -92,43 +100,43 @@ async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = []
 
     for r in user_rows:
-        num = r.get("Номер разбора", "")
-        name = r.get("Название позиции", "")
-        kzt = int(r.get("Цена в тенге", 0) or 0)
-        rub = int(r.get("Цена в рублях", 0) or 0)
+        num = r[0]                 # A — Номер разбора
+        name = r[1]                # B — Название позиции
+        price_kzt = int(r[3] or 0) # D — Цена в тенге
+        price_rub = int(r[4] or 0) # E — Цена в рублях
 
-        total_kzt += kzt
-        total_rub += rub
+        total_kzt += price_kzt
+        total_rub += price_rub
 
         lines.append(
-            f"• #{num} — {name}\n"
-            f"  {kzt} ₸ / {rub} ₽"
+            f"📦 *Разбор:* {num}\n"
+            f"• {name}\n"
+            f"• {price_kzt} ₸ / {price_rub} ₽"
         )
 
     text = (
-        f"{username}\n\n"
+        f"Нашла для {username}:\n\n"
         + "\n\n".join(lines)
         + "\n\n"
-        f"💰 *Общая сумма к оплате:*\n"
-        f"*{total_kzt} ₸ / {total_rub} ₽*"
+        f"*Итого к оплате:*\n"
+        f"**{total_kzt} ₸ / {total_rub} ₽**"
     )
 
     await update.message.reply_text(
         text,
-        parse_mode="Markdown",
-        reply_markup=MAIN_KEYBOARD
+        parse_mode="Markdown"
     )
 
 # ================== ЗАПУСК ==================
 
-def main():
+async def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_button))
+    app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_username))
 
-    app.run_polling()
+    await app.run_polling()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
