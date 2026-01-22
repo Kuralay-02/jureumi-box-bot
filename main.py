@@ -1,38 +1,20 @@
-import json
 import os
-import gspread
-from google.oauth2.service_account import Credentials
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-print("Starting Google Sheets check...")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise Exception("BOT_TOKEN not found")
 
-# 1. Берём credentials из переменной окружения
-creds_json = os.getenv("GOOGLE_CREDENTIALS")
-if not creds_json:
-    raise Exception("GOOGLE_CREDENTIALS not found")
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Здравствуйте!\n"
+        "Я буду уведомлять о выходе новых доставок коробок до админа\n"
+        "и помогу посчитать вам сумму к оплате 💸"
+    )
 
-creds_dict = json.loads(creds_json)
+app = ApplicationBuilder().token(BOT_TOKEN).build()
+app.add_handler(CommandHandler("start", start))
 
-# 2. Настраиваем доступ
-scopes = [
-    "https://www.googleapis.com/auth/spreadsheets.readonly",
-    "https://www.googleapis.com/auth/drive.readonly"
-]
-
-credentials = Credentials.from_service_account_info(
-    creds_dict,
-    scopes=scopes
-)
-
-gc = gspread.authorize(credentials)
-
-# 3. Открываем реестр коробок
-SPREADSHEET_ID = "1OoNWbRIvj23dAwVC75RMf7SrNqzGHjFuIdB-jwTntQc"
-
-sh = gc.open_by_key(SPREADSHEET_ID)
-worksheet = sh.sheet1
-
-rows = worksheet.get_all_records()
-
-print("УСПЕШНО!")
-print("Найдено строк:", len(rows))
-print("Первая строка:", rows[0] if rows else "Таблица пустая")
+print("Bot started and polling...")
+app.run_polling()
