@@ -136,6 +136,25 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="MarkdownV2",
             disable_web_page_preview=True
         )
+       
+        for box in boxes:
+            text = build_box_notification_text(box)
+            keyboard = build_box_notification_keyboard()
+
+            for chat_id in SUBSCRIBERS:
+                try:
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=text,
+                        reply_markup=keyboard,
+                        parse_mode="MarkdownV2",
+                        disable_web_page_preview=True
+                    )
+                except Exception as e:
+                    print(f"Не удалось отправить {chat_id}: {e}")
+
+        await query.message.reply_text("✅ Уведомления отправлены подписчикам")
+
 
 
 
