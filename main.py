@@ -169,12 +169,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
 
     if chat_id == ADMIN_CHAT_ID:
-    buttons.append(
-        [InlineKeyboardButton("📣 Разослать уведомление", callback_data="notify")]
-    )
-    buttons.append(
-    [InlineKeyboardButton("🔔 Напомнить за 24 часа", callback_data="remind_24h_preview")]
-)
+        buttons.append(
+            [InlineKeyboardButton("📣 Разослать уведомление", callback_data="notify")]
+        )
+        buttons.append(
+            [InlineKeyboardButton("🔔 Напомнить за 24 часа", callback_data="remind_24h_preview")]
+        )
 
     keyboard = InlineKeyboardMarkup(buttons)
 
