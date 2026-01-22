@@ -133,7 +133,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await query.message.reply_text(
             text,
-            parse_mode="MarkdownV2",
+            parse_mode="Markdown",
             disable_web_page_preview=True
         )
        
@@ -141,13 +141,13 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = build_box_notification_text(box)
             keyboard = build_box_notification_keyboard()
 
-            for chat_id in SUBSCRIBERS:
+            for chat_id in [ADMIN_CHAT_ID]:
                 try:
                     await context.bot.send_message(
                         chat_id=chat_id,
                         text=text,
                         reply_markup=keyboard,
-                        parse_mode="MarkdownV2",
+                        parse_mode="Markdown",
                         disable_web_page_preview=True
                     )
                 except Exception as e:
