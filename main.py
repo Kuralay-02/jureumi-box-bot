@@ -47,7 +47,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     SUBSCRIBERS.add(update.effective_chat.id)
 
     keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("📦 Посчитать мою сумму", callback_data="calc")]]
+        [[InlineKeyboardButton("📦 Посчитать мою сумму к оплате доставки до админа", callback_data="calc")]]
     )
 
     await update.message.reply_text(
@@ -185,7 +185,7 @@ async def notify_new_boxes(app):
         text += box["Ссылка на таблицу"]
 
         keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("📦 Посчитать мою сумму", callback_data="calc")]]
+            [[InlineKeyboardButton("📦 Посчитать мою сумму к оплате доставки до админа", callback_data="calc")]]
         )
 
         for chat_id in SUBSCRIBERS:
