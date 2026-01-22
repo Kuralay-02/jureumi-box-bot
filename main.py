@@ -18,7 +18,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-ADMIN_ID = 635801439
+
 SUBSCRIBERS = set()
 
 # ================== ENV ==================
