@@ -126,6 +126,7 @@ async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"📦 **{box_name}**\n"
                 + "\n".join(box_lines)
                 + f"\n⏰ Дедлайн: {deadline}"
+                
                 + "\n🧾 Чек отправить в @jureumireceiptsbot"
             )
 
@@ -143,9 +144,15 @@ async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if requisites_text:
         final_text += f"\n\n💳 **Реквизиты для оплаты:**\n{requisites_text}"
 
-    final_text += f"\n\n💰 **Итого к оплате:**\n**{total_kzt} ₸ / {total_rub} ₽**"
+   final_text += (
+    f"\n\n💰 **Итого к оплате:**\n"
+    f"**{total_kzt} ₸ / {total_rub} ₽**"
+)
 
-    await update.message.reply_text(final_text, parse_mode="Markdown")
+await update.message.reply_text(
+    final_text,
+    parse_mode="Markdown"
+)
 
 
 # ================== MAIN ==================
