@@ -1,9 +1,6 @@
 import os
 import json
-
 import gspread
-from google.oauth2.service_account import Credentials
-
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -17,40 +14,33 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-
-# ================== НАСТРОЙКИ ==================
+from oauth2client.service_account import ServiceAccountCredentials
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 REGISTRY_SHEET_URL = os.getenv("REGISTRY_SHEET_URL")
-GOOGLE_CREDENTIALS = os.getenv("GOOGLE_CREDENTIALS")
+GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDS_JSON")
 
-# ================== GOOGLE SHEETS ==================
-
-creds_dict = json.loads(GOOGLE_CREDENTIALS)
-
-scopes = [
-    "https://www.googleapis.com/auth/spreadsheets",
+# ---------------- Google auth ----------------
+scope = [
+    "https://spreadsheets.google.com/feeds",
     "https://www.googleapis.com/auth/drive",
 ]
 
-creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+creds_dict = json.loads(GOOGLE_CREDS_JSON)
+creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 gc = gspread.authorize(creds)
 
-# ================== /start ==================
-
+# ---------------- START ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📦 Посчитать мою сумму", callback_data="calc")]
     ])
     await update.message.reply_text(
-        "Здравствуйте!\n\n"
-        "Я помогу посчитать сумму к оплате.\n"
-        "Нажмите кнопку ниже 👇",
+        "Здравствуйте!\n\nЯ помогу посчитать сумму к оплате.\nНажмите кнопку ниже 👇",
         reply_markup=keyboard
     )
 
-# ================== КНОПКА ==================
-
+# ---------------- BUTTON ----------------
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -58,12 +48,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "calc":
         context.user_data["waiting_username"] = True
         await query.message.reply_text(
-            "Пожалуйста, введите ваш Telegram-юзернейм\n"
-            "(например: @anna)"
+            "Пожалуйста, введите ваш Telegram-юзернейм\n(например: @anna)"
         )
 
-# ================== ЮЗЕРНЕЙМ ==================
-
+# ---------------- USERNAME ----------------
 async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get("waiting_username"):
         return
@@ -76,16 +64,16 @@ async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         sheet = gc.open_by_url(REGISTRY_SHEET_URL).sheet1
-        raw_rows = sheet.get_all_values()[1:]  # без заголовков
+        rows = sheet.get_all_records()
     except Exception:
         await update.message.reply_text("Ошибка доступа к таблице 😢")
         return
 
-    user_rows = []
-    for r in raw_rows:
-        tg_nick = str(r[2]).strip().lower()  # колонка C — Ник в тг
-        if tg_nick == username:
-            user_rows.append(r)
+    # 🔴 ВАЖНО: поиск по колонке "Ник в тг"
+    user_rows = [
+        r for r in rows
+        if str(r.get("Ник в тг", "")).strip().lower() == username
+    ]
 
     if not user_rows:
         await update.message.reply_text(
@@ -95,34 +83,23 @@ async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     total_kzt = 0
     total_rub = 0
-    lines = []
+    boxes = set()
 
     for r in user_rows:
-        box_num = r[0]
-        item_name = r[1]
-        price_kzt = int(r[3]) if r[3].isdigit() else 0
-        price_rub = int(r[4]) if r[4].isdigit() else 0
+        boxes.add(str(r.get("Номер разбора", "")).strip())
+        total_kzt += int(r.get("Цена в тенге", 0) or 0)
+        total_rub += int(r.get("Цена в рублях", 0) or 0)
 
-        total_kzt += price_kzt
-        total_rub += price_rub
+    box_list = ", ".join(sorted(boxes))
 
-        lines.append(
-            f"📦 Разбор {box_num}\n"
-            f"{item_name}\n"
-            f"— {price_kzt} ₸ / {price_rub} ₽"
-        )
-
-    text = (
-        f"Нашла для {username}:\n\n"
-        + "\n\n".join(lines)
-        + f"\n\n💰 Итого:\n{total_kzt} ₸ / {total_rub} ₽"
+    await update.message.reply_text(
+        f"📦 Коробки: {box_list}\n\n"
+        f"💰 К оплате:\n"
+        f"{total_kzt} тенге\n"
+        f"{total_rub} рублей"
     )
 
-    await update.message.reply_text(text)
-
-
-# ================== ЗАПУСК ==================
-
+# ---------------- MAIN ----------------
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
@@ -134,4 +111,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
