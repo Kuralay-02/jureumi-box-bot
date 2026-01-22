@@ -24,6 +24,7 @@ SUBSCRIBERS = set()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 REGISTRY_SHEET_URL = os.getenv("REGISTRY_SHEET_URL")
 GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
+ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
 # ================== GOOGLE ==================
 creds_dict = json.loads(GOOGLE_CREDS_JSON)
