@@ -55,6 +55,20 @@ def get_new_boxes_from_registry():
 
     return new_boxes
 
+def build_box_notification_text(box):
+    name = box["name"]
+    link = box["link"]
+    deadline = box["deadline"]
+
+    return (
+        "📦 **Вышла новая коробка!**\n"
+        "Проверь себя по юзернейму ❤️\n\n"
+        f"📦 **[{name}]({link})**\n"
+        f"⏰ Дедлайн: {deadline}\n\n"
+        "👉 Нажми кнопку ниже, чтобы посчитать сумму"
+    )
+
+
 
 # ================== START ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
