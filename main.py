@@ -81,7 +81,7 @@ async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Ошибка доступа к таблице 😢")
         return
 
-    # --- поиск по колонке C (ник в тг) ---
+    # --- поиск по колонке C (Ник в тг) ---
     user_rows = []
     for r in raw_rows:
         tg_nick = str(r[2]).strip().lower()  # C
