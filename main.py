@@ -8,6 +8,7 @@ from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    ReplyKeyboardRemove,
 )
 from telegram.ext import (
     ApplicationBuilder,
@@ -35,9 +36,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [[InlineKeyboardButton("📦 Посчитать мою сумму", callback_data="calc")]]
     )
     await update.message.reply_text(
-        "Здравствуйте!\n\nЯ помогу посчитать сумму к оплате.\nНажмите кнопку ниже 👇",
-        reply_markup=keyboard,
-    )
+    "Здравствуйте!\n\nЯ помогу посчитать сумму к оплате.\nНажмите кнопку ниже 👇",
+    reply_markup=ReplyKeyboardRemove()
+)
+
 
 # ================== BUTTON ==================
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
