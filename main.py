@@ -1,6 +1,5 @@
 import os
 import json
-import asyncio
 import gspread
 from google.oauth2.service_account import Credentials
 from telegram import Update, ReplyKeyboardMarkup
@@ -82,7 +81,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     username = update.message.text.strip()
-
     if not username.startswith("@"):
         await update.message.reply_text("Введите юзернейм в формате @username")
         return
@@ -100,7 +98,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         box_name = box.get("Название коробки")
         box_url = box.get("Ссылка на таблицу")
-
         if not box_url:
             continue
 
@@ -138,12 +135,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for item in items:
             kzt = int(item.get("Цена в тенге", 0))
             rub = int(item.get("Цена в рублях", 0))
-
             box_sum_kzt += kzt
             box_sum_rub += rub
 
             razbor = str(item.get("Номер разбора", "")).strip()
-
             message += (
                 f"{razbor} — {item.get('Название позиции')} — "
                 f"{kzt} ₸ / {rub} ₽\n"
@@ -158,7 +153,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             message += f"\n💳 Реквизиты для оплаты:\n{meta['payment']}\n"
 
         message += "\n"
-
         total_kzt += box_sum_kzt
         total_rub += box_sum_rub
 
@@ -171,47 +165,38 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
 
 # ================= NOTIFICATIONS =================
-async def check_new_boxes(app):
-    while True:
-        try:
-            known = load_json(BOXES_FILE, [])
+async def check_new_boxes(context: ContextTypes.DEFAULT_TYPE):
+    known = load_json(BOXES_FILE, [])
+    rows = gc.open_by_key(REESTR_SHEET_ID).sheet1.get_all_records()
 
-            rows = gc.open_by_key(REESTR_SHEET_ID).sheet1.get_all_records()
+    current_active = [
+        f"{r.get('Название коробки')}|{r.get('Ссылка на таблицу')}"
+        for r in rows
+        if r.get("Активна", "").lower() == "да"
+    ]
 
-            current_active = [
-                f"{r.get('Название коробки')}|{r.get('Ссылка на таблицу')}"
-                for r in rows
-                if r.get("Активна", "").lower() == "да"
-            ]
+    new_boxes = [b for b in current_active if b not in known]
 
-            new_boxes = [b for b in current_active if b not in known]
+    if new_boxes:
+        users = load_json(USERS_FILE, [])
+        for box in new_boxes:
+            name = box.split("|")[0]
+            text = f"📦 *Новая активная коробка!*\n\n{name}"
 
-            if new_boxes:
-                users = load_json(USERS_FILE, [])
+            for user_id in users:
+                try:
+                    await context.bot.send_message(
+                        chat_id=int(user_id),
+                        text=text,
+                        parse_mode="Markdown",
+                    )
+                except Exception:
+                    pass
 
-                for box in new_boxes:
-                    name = box.split("|")[0]
-                    text = f"📦 *Новая активная коробка!*\n\n{name}"
-
-                    for user_id in users:
-                        try:
-                            await app.bot.send_message(
-                                chat_id=int(user_id),
-                                text=text,
-                                parse_mode="Markdown",
-                            )
-                        except Exception:
-                            pass
-
-                save_json(BOXES_FILE, current_active)
-
-        except Exception as e:
-            print("Notification error:", e)
-
-        await asyncio.sleep(600)  # каждые 10 минут
+        save_json(BOXES_FILE, current_active)
 
 # ================= MAIN =================
-async def main():
+def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -225,10 +210,11 @@ async def main():
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text)
     )
 
-    app.create_task(check_new_boxes(app))
+    # 🔔 проверка новых коробок каждые 10 минут
+    app.job_queue.run_repeating(check_new_boxes, interval=600, first=30)
 
-    print("Bot is fully running 🚀")
-    await app.run_polling()
+    print("Bot is running correctly 🚀")
+    app.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
