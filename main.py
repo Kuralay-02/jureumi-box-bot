@@ -55,6 +55,88 @@ def get_new_boxes_from_registry():
         })
 
     return new_boxes
+    
+import re
+from datetime import datetime, timedelta
+import pytz
+
+MSK_TZ = pytz.timezone("Europe/Moscow")
+
+
+def parse_deadline_msk(deadline_text: str) -> datetime | None:
+    """
+    Из строки вида:
+    '23:00 по ACT / 21:00 по МСК 01.02.2026'
+    извлекает дедлайн как datetime в МСК
+    """
+
+    if not deadline_text:
+        return None
+
+    # ищем время после "по МСК"
+    time_match = re.search(r"(\d{1,2}:\d{2})\s*по\s*МСК", deadline_text)
+    date_match = re.search(r"(\d{2}\.\d{2}\.\d{4})", deadline_text)
+
+    if not time_match or not date_match:
+        return None
+
+    time_part = time_match.group(1)   # 21:00
+    date_part = date_match.group(1)   # 01.02.2026
+
+    dt_str = f"{date_part} {time_part}"
+
+    naive_dt = datetime.strptime(dt_str, "%d.%m.%Y %H:%M")
+    return MSK_TZ.localize(naive_dt)
+
+def should_send_24h_reminder(deadline_dt: datetime) -> bool:
+    now_msk = datetime.now(MSK_TZ)
+    return timedelta(hours=0) <= (deadline_dt - now_msk) <= timedelta(hours=24)
+
+def get_boxes_for_24h_reminder():
+    sheet = gc.open_by_url(REGISTRY_SHEET_URL).sheet1
+    rows = sheet.get_all_records()
+
+    boxes = []
+
+    for row in rows:
+        if str(row.get("Активна", "")).strip().lower() != "да":
+            continue
+
+        if str(row.get("Напоминание за 24ч отправлено", "")).strip().lower() == "да":
+            continue
+
+        deadline_text = row.get("Дедлайн оплаты", "")
+        deadline_dt = parse_deadline_msk(deadline_text)
+
+        if not deadline_dt:
+            continue
+
+        if should_send_24h_reminder(deadline_dt):
+            boxes.append({
+                "name": row.get("Название коробки"),
+                "link": row.get("Ссылка на таблицу"),
+                "deadline": deadline_text,
+            })
+
+    return boxes
+
+def build_24h_reminder_text(box):
+    name = box["name"]
+    link = box["link"]
+    deadline = box["deadline"]
+
+    return (
+        "⏰ **Напоминание! До дедлайна осталось 24 часа**\n\n"
+        "Проверь себя по юзернейму ❤️\n\n"
+        f"📦 **[{name}]({link})**\n\n"
+        f"⏳ Дедлайн оплаты: {deadline}\n\n"
+        "👉 Нажми кнопку ниже, чтобы посчитать сумму к оплате"
+    )
+
+def build_box_notification_keyboard():
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("📦 Посчитать сумму", callback_data="calc")]]
+    )
 
 def build_box_notification_text(box):
     name = box["name"]
