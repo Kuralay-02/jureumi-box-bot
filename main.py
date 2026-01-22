@@ -1,6 +1,5 @@
 import os
 import json
-import asyncio
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -129,14 +128,15 @@ async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================== ЗАПУСК ==================
 
-async def main():
+def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_username))
 
-    await app.run_polling()
+    app.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
+
