@@ -139,13 +139,15 @@ async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     final_text = f"👤 **{username}**\n\n"
-    final_text += "\n\n".join(box_blocks)
+final_text += "\n\n".join(box_blocks)
 
-    if requisites_text:
-        final_text += f"\n\n💳 **Реквизиты для оплаты:**\n{requisites_text}"
+if requisites_text:
+    final_text += f"\n\n💳 **Реквизиты для оплаты:**\n{requisites_text}"
 
-   final_text += (f"\n\n💰 **Итого к оплате:**\n"
-    f"**{total_kzt} ₸ / {total_rub} ₽**")
+final_text += (
+    f"\n\n💰 **Итого к оплате:**\n"
+    f"**{total_kzt} ₸ / {total_rub} ₽**"
+)
 
 await update.message.reply_text(
     final_text,
