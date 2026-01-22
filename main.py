@@ -19,6 +19,7 @@ from telegram.ext import (
     filters,
 )
 
+ADMIN_CHAT_ID = 635801439
 SUBSCRIBERS = set()
 
 # ================== ENV ==================
