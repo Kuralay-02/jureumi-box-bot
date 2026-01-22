@@ -1,11 +1,12 @@
 import os
 import json
-import re
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
+import pytz
 
 import gspread
-from google.oauth2.service_account import Credentials
+from oauth2client.service_account import ServiceAccountCredentials
+
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -14,206 +15,214 @@ from telegram import (
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
-    MessageHandler,
     CallbackQueryHandler,
+    MessageHandler,
     ContextTypes,
     filters,
 )
 
-# ================= НАСТРОЙКИ =================
+# ================== ENV ==================
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+REGISTRY_SHEET_URL = os.getenv("REGISTRY_SHEET_URL")
+GOOGLE_CREDENTIALS = os.getenv("GOOGLE_CREDENTIALS")
 
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-REGISTRY_SHEET_URL = os.environ["REGISTRY_SHEET_URL"]
-GOOGLE_CREDENTIALS = os.environ["GOOGLE_CREDENTIALS"]
-
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
+# ================== GOOGLE ==================
+scope = [
+    "https://spreadsheets.google.com/feeds",
     "https://www.googleapis.com/auth/drive",
 ]
 
-creds = Credentials.from_service_account_info(
-    json.loads(GOOGLE_CREDENTIALS),
-    scopes=SCOPES,
-)
+creds_dict = json.loads(GOOGLE_CREDENTIALS)
+creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 gc = gspread.authorize(creds)
 
-# ================= ХРАНИЛИЩА =================
+# ================== STORAGE ==================
+USERS_FILE = "users.json"
+NOTIFIED_FILE = "notified_boxes.json"
 
-SUBSCRIBERS = set()
+def load_json(path, default):
+    if not os.path.exists(path):
+        return default
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
-# ================= /start =================
+def save_json(path, data):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
+users = load_json(USERS_FILE, [])
+notified_boxes = load_json(NOTIFIED_FILE, [])
+
+# ================== HELPERS ==================
+def parse_deadline(text: str):
+    try:
+        dt = datetime.strptime(text.strip(), "%d.%m.%Y %H:%M")
+        return pytz.timezone("Asia/Almaty").localize(dt)
+    except:
+        return None
+
+def bold(text):
+    return f"<b>{text}</b>"
+
+# ================== /start ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    SUBSCRIBERS.add(update.effective_chat.id)
+    chat_id = update.effective_chat.id
+    if chat_id not in users:
+        users.append(chat_id)
+        save_json(USERS_FILE, users)
 
-    keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("📦 Посчитать мою сумму к оплате доставки до админа", callback_data="calc")]]
-    )
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📦 Посчитать мою сумму", callback_data="calc")]
+    ])
 
     await update.message.reply_text(
         "Здравствуйте!\n"
-        "Я буду уведомлять о выходе новых доставок коробок до админа\n"
-        "и помогу посчитать вам сумму к оплате 💸",
-        reply_markup=keyboard,
+        "Я уведомляю о выходе новых коробок и считаю сумму к оплате 💸",
+        reply_markup=keyboard
     )
 
-# ================= КНОПКА =================
-
-async def calc_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    await query.message.reply_text(
-        "Пожалуйста, введите ваш Telegram-юзернейм\n"
-        "(например: @anna)"
+# ================== CALC FLOW ==================
+async def calc_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    context.user_data["awaiting_username"] = True
+    await update.callback_query.message.reply_text(
+        "Пожалуйста, введите ваш Telegram-юзернейм\n(например: @anna)"
     )
-    context.user_data["wait_username"] = True
 
-# ================= ТЕКСТ =================
-
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get("wait_username"):
+async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get("awaiting_username"):
         return
 
-    username = update.message.text.strip().lower()
+    username = update.message.text.strip()
     if not username.startswith("@"):
         await update.message.reply_text("Юзернейм должен начинаться с @")
         return
 
-    context.user_data["wait_username"] = False
-    await calculate(update, context, username)
+    context.user_data["awaiting_username"] = False
+    await calculate_for_user(update, context, username)
 
-# ================= РАСЧЁТ =================
-
-async def calculate(update, context, username):
+# ================== CALCULATION ==================
+async def calculate_for_user(update, context, username):
     registry = gc.open_by_url(REGISTRY_SHEET_URL).sheet1.get_all_records()
 
     total_kzt = 0
     total_rub = 0
-    text = f"{username}\n\n"
-    payment_details = None
+    output = [username]
+
+    shown_requisites = False
 
     for box in registry:
-        if str(box.get("Активна", "")).lower() != "да":
+        if str(box["Активна"]).lower() != "да":
             continue
 
-        box_name = box.get("Название коробки")
-        box_url = box.get("Ссылка на таблицу")
-        deadline = box.get("Дедлайн оплаты", "")
-        recs = box.get("Реквизиты для оплаты", "")
+        box_name = box["Название коробки"]
+        box_url = box["Ссылка на таблицу"]
+        deadline_text = box["Дедлайн оплаты"]
+        requisites = box["Реквизиты для оплаты"]
 
-        if payment_details is None and recs:
-            payment_details = recs
+        sheet = gc.open_by_url(box_url).sheet1.get_all_records()
 
-        sheet = gc.open_by_url(box_url).sheet1
-        rows = sheet.get_all_records()
-
-        box_kzt = 0
-        box_rub = 0
+        box_sum_kzt = 0
+        box_sum_rub = 0
         lines = []
 
-        for row in rows:
-            if row.get("Ник в тг", "").lower() != username:
-                continue
-            if str(row.get("Статус оплаты", "")).lower() == "оплачено":
+        for row in sheet:
+            if row["Ник в тг"] != username:
                 continue
 
-            razbor = re.sub(r"^#+", "#", str(row.get("Номер разбора", "")))
-            kzt = int(row.get("Цена в тенге", 0))
-            rub = int(row.get("Цена в рублях", 0))
+            kzt = int(row["Цена в тенге"] or 0)
+            rub = int(row["Цена в рублях"] or 0)
 
-            box_kzt += kzt
-            box_rub += rub
+            box_sum_kzt += kzt
+            box_sum_rub += rub
 
             lines.append(
-                f"{razbor} — {row.get('Название позиции')} — "
-                f"{kzt} ₸ / {rub} ₽"
+                f'#{row["Номер разбора"]} — {row["Название позиции"]} — {kzt} ₸ / {rub} ₽'
             )
 
         if not lines:
             continue
 
-        total_kzt += box_kzt
-        total_rub += box_rub
+        total_kzt += box_sum_kzt
+        total_rub += box_sum_rub
 
-        text += f"📦 {box_name}\n"
-        text += "\n".join(lines)
-        text += f"\nИтого по коробке: {box_kzt} ₸ / {box_rub} ₽\n"
+        output.append(
+            f"\n📦 <b>{box_name}</b>\n"
+            + "\n".join(lines)
+            + f"\nИтого по коробке: {box_sum_kzt} ₸ / {box_sum_rub} ₽"
+        )
 
-        if deadline:
-            text += f"\n⏰ Дедлайн оплаты:\n{deadline}\n"
+        # дедлайн показываем всегда
+        output.append(f"\n⏰ <b>Дедлайн оплаты:</b>\n{deadline_text}")
 
-        text += "\n"
+        # реквизиты — ТОЛЬКО 1 раз
+        if not shown_requisites:
+            output.append(f"\n💳 <b>Реквизиты для оплаты:</b>\n{requisites}")
+            shown_requisites = True
 
     if total_kzt == 0 and total_rub == 0:
-        await update.message.reply_text(
-            "У вас нет неоплаченных позиций в активных коробках ✅"
-        )
+        await update.message.reply_text("По этому юзернейму ничего не найдено.")
         return
 
-    if payment_details:
-        text += f"\n💳 Реквизиты для оплаты:\n{payment_details}"
-
-    text += (
-        f"\n\n💰 *Общая сумма к оплате:*\n"
-        f"*{total_kzt} ₸ / {total_rub} ₽*"
+    output.append(
+        f"\n💰 <b>Общая сумма к оплате:</b>\n"
+        f"<b>{total_kzt} ₸ / {total_rub} ₽</b>"
     )
 
-    await update.message.reply_text(text, parse_mode="Markdown")
+    await update.message.reply_text(
+        "\n".join(output),
+        parse_mode="HTML"
+    )
 
-# ================= УВЕДОМЛЕНИЯ =================
+# ================== NOTIFICATIONS ==================
+async def check_new_boxes(context: ContextTypes.DEFAULT_TYPE):
+    registry = gc.open_by_url(REGISTRY_SHEET_URL).sheet1.get_all_records()
 
-async def notify_new_boxes(app):
-    registry = gc.open_by_url(REGISTRY_SHEET_URL).sheet1
-    rows = registry.get_all_records()
-
-    for box in rows:
-        if str(box.get("Активна", "")).lower() != "да":
+    for box in registry:
+        if str(box["Активна"]).lower() != "да":
             continue
-        if str(box.get("Уведомление отправлено", "")).lower() == "yes":
+
+        box_id = box["Ссылка на таблицу"]
+        if box_id in notified_boxes:
             continue
+
+        notified_boxes.append(box_id)
+        save_json(NOTIFIED_FILE, notified_boxes)
 
         text = (
-            "📦 *Вышла новая коробка!*\n"
+            "📦 <b>Вышла новая коробка!</b>\n"
             "Проверь себя по юзернейму или я могу посчитать за тебя ❤️\n\n"
-            f"{box['Название коробки']}\n"
+            f"<b>{box['Название коробки']}</b>\n"
+            f"{box['Ссылка на таблицу']}\n\n"
+            f"⏰ <b>Дедлайн:</b> {box['Дедлайн оплаты']}"
         )
 
-        if box.get("Дедлайн оплаты"):
-            text += f"⏰ Дедлайн оплаты:\n{box['Дедлайн оплаты']}\n\n"
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📦 Посчитать мою сумму", callback_data="calc")]
+        ])
 
-        text += box["Ссылка на таблицу"]
+        for user_id in users:
+            try:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=text,
+                    reply_markup=keyboard,
+                    parse_mode="HTML"
+                )
+            except:
+                pass
 
-        keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("📦 Посчитать мою сумму к оплате доставки до админа", callback_data="calc")]]
-        )
-
-        for chat_id in SUBSCRIBERS:
-            await app.bot.send_message(
-                chat_id,
-                text,
-                reply_markup=keyboard,
-                parse_mode="Markdown",
-            )
-
-# ================= MAIN =================
-
-async def post_init(app):
-    asyncio.create_task(notify_new_boxes(app))
-
-def main():
-    app = (
-        ApplicationBuilder()
-        .token(BOT_TOKEN)
-        .post_init(post_init)
-        .build()
-    )
+# ================== MAIN ==================
+async def main():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(calc_button, pattern="^calc$"))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(CallbackQueryHandler(calc_start, pattern="^calc$"))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_username))
 
-    app.run_polling()
+    app.job_queue.run_repeating(check_new_boxes, interval=60, first=5)
+
+    await app.run_polling()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
