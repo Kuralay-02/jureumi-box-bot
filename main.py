@@ -110,6 +110,35 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=ReplyKeyboardRemove()
         )
 
+    elif query.data == "notify":
+        if update.effective_chat.id != ADMIN_CHAT_ID:
+            await query.answer("Недостаточно прав", show_alert=True)
+            return
+
+        boxes = get_new_boxes_from_registry()
+
+        if not boxes:
+            await query.message.reply_text(
+                "❌ Нет новых коробок для уведомления"
+            )
+            return
+
+        text = "📦 Коробки, готовые к уведомлению:\n\n"
+
+        for box in boxes:
+            text += (
+                f"• **[{box['name']}]({box['link']})**\n"
+                f"  ⏰ Дедлайн: {box['deadline']}\n\n"
+            )
+
+        await query.message.reply_text(
+            text,
+            parse_mode="MarkdownV2",
+            disable_web_page_preview=True
+        )
+
+
+
 # ================== USERNAME ==================
 async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get("waiting_username"):
