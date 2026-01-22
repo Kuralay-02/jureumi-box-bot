@@ -65,6 +65,11 @@ async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         sheet = gc.open_by_url(REGISTRY_SHEET_URL).sheet1
         rows = sheet.get_all_records()
+        await update.message.reply_text(
+    "DEBUG заголовки колонок:\n"
+    + ", ".join(rows[0].keys())
+)
+
     except Exception:
         await update.message.reply_text("Ошибка доступа к таблице 😢")
         return
