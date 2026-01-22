@@ -173,8 +173,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📣 Разослать уведомление", callback_data="notify")]
     )
     buttons.append(
-        [InlineKeyboardButton("🔔 Напомнить за 24 часа", callback_data="remind_24h")]
-    )
+    [InlineKeyboardButton("🔔 Напомнить за 24 часа", callback_data="remind_24h_preview")]
+)
 
     keyboard = InlineKeyboardMarkup(buttons)
 
@@ -240,7 +240,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await query.message.reply_text("✅ Уведомления отправлены подписчикам")
 
-    elif query.data == "remind_24h":
+    elif query.data == "remind_24h_preview":
         if update.effective_chat.id != ADMIN_CHAT_ID:
             await query.answer("Недостаточно прав", show_alert=True)
             return
@@ -248,16 +248,50 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         boxes = get_boxes_for_24h_reminder()
 
         if not boxes:
-            await query.message.reply_text(
-                "⏰ Нет коробок для напоминания за 24 часа"
-            )
+            await query.message.reply_text("⏰ Нет коробок для напоминания за 24 часа")
             return
+
+        text = "🔔 **Напоминание за 24 часа — предпросмотр**\n\n"
+
+        for box in boxes:
+            text += (
+                f"• **[{box['name']}]({box['link']})**\n"
+                f"⏰ Дедлайн: {box['deadline']}\n\n"
+            )
+
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Отправить напоминание", callback_data="remind_24h_send")],
+            [InlineKeyboardButton("❌ Отмена", callback_data="cancel")]
+        ])
+
+        await query.message.reply_text(
+            text,
+            parse_mode="Markdown",
+            disable_web_page_preview=True,
+            reply_markup=keyboard
+        )
+
+    elif query.data == "cancel":
+        await query.message.reply_text("❌ Действие отменено")
+
+    elif query.data == "remind_24h_send":
+        if update.effective_chat.id != ADMIN_CHAT_ID:
+            await query.answer("Недостаточно прав", show_alert=True)
+            return
+
+        boxes = get_boxes_for_24h_reminder()
+
+        if not boxes:
+            await query.message.reply_text("⏰ Нет коробок для напоминания за 24 часа")
+            return
+
+        sent = 0
 
         for box in boxes:
             text = (
                 "⏰ **Напоминание! Осталось 24 часа до дедлайна**\n\n"
                 f"📦 **[{box['name']}]({box['link']})**\n"
-                f"⏳ Дедлайн: {box['deadline']}\n\n"
+                f"🕒 Дедлайн: {box['deadline']}\n\n"
                 "👉 Проверь себя по юзернейму и не забудь оплатить"
             )
 
@@ -275,7 +309,11 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception as e:
                     print(f"Не удалось отправить {chat_id}: {e}")
 
-        await query.message.reply_text("✅ Напоминания за 24 часа отправлены")
+            sent += 1
+
+        await query.message.reply_text(
+            f"✅ Напоминания отправлены\n📦 Коробок: {sent}"
+        )
 
 
 
