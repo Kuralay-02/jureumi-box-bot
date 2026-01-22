@@ -69,7 +69,6 @@ async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Ошибка доступа к таблице 😢")
         return
 
-    # 🔴 ВАЖНО: поиск по колонке "Ник в тг"
     user_rows = [
         r for r in rows
         if str(r.get("Ник в тг", "")).strip().lower() == username
@@ -83,21 +82,29 @@ async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     total_kzt = 0
     total_rub = 0
-    boxes = set()
+    text_lines = []
 
     for r in user_rows:
-        boxes.add(str(r.get("Номер разбора", "")).strip())
-        total_kzt += int(r.get("Цена в тенге", 0) or 0)
-        total_rub += int(r.get("Цена в рублях", 0) or 0)
+        num = r.get("Номер разбора", "")
+        name = r.get("Название позиции", "")
+        kzt = int(r.get("Цена в тенге", 0) or 0)
+        rub = int(r.get("Цена в рублях", 0) or 0)
 
-    box_list = ", ".join(sorted(boxes))
+        total_kzt += kzt
+        total_rub += rub
 
-    await update.message.reply_text(
-        f"📦 Коробки: {box_list}\n\n"
-        f"💰 К оплате:\n"
-        f"{total_kzt} тенге\n"
-        f"{total_rub} рублей"
+        text_lines.append(
+            f"• {num} — {name}: {kzt}₸ / {rub}₽"
+        )
+
+    text = (
+        f"📦 Ваши позиции:\n\n"
+        + "\n".join(text_lines)
+        + f"\n\n💰 Итого: {total_kzt}₸ / {total_rub}₽"
     )
+
+    await update.message.reply_text(text)
+
 
 # ---------------- MAIN ----------------
 def main():
