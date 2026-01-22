@@ -1,27 +1,41 @@
 import os
 import json
 import asyncio
+import re
+from datetime import datetime
+
 import gspread
 from google.oauth2.service_account import Credentials
-from telegram import Update, ReplyKeyboardMarkup
+from telegram import (
+    Update,
+    ReplyKeyboardMarkup,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     ContextTypes,
     filters,
 )
 
+# ================= ENV =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GOOGLE_CREDENTIALS = os.getenv("GOOGLE_CREDENTIALS")
 
 if not BOT_TOKEN or not GOOGLE_CREDENTIALS:
     raise RuntimeError("ENV variables not found")
 
+# ================= FILES =================
 USERS_FILE = "users.json"
 BOXES_FILE = "known_boxes.json"
+
+# ================= STATE =================
 ASK_USERNAME = "ask_username"
 
+# ================= GOOGLE =================
 REESTR_SHEET_ID = "1OoNWbRIvj23dAwVC75RMf7SrNqzGHjFuIdB-jwTntQc"
 
 creds_dict = json.loads(GOOGLE_CREDENTIALS)
@@ -32,19 +46,30 @@ scopes = [
 credentials = Credentials.from_service_account_info(creds_dict, scopes=scopes)
 gc = gspread.authorize(credentials)
 
-
+# ================= HELPERS =================
 def load_json(path, default):
     if not os.path.exists(path):
         return default
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
-
 def save_json(path, data):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
+def deadline_active(text: str) -> bool:
+    if not text:
+        return False
+    m = re.search(r"(\d{2}\.\d{2}\.\d{4})", text)
+    if not m:
+        return True
+    try:
+        d = datetime.strptime(m.group(1), "%d.%m.%Y")
+        return datetime.now() <= d
+    except Exception:
+        return True
 
+# ================= HANDLERS =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     users = load_json(USERS_FILE, [])
@@ -60,13 +85,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
     )
 
-
 async def ask_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
     context.user_data["state"] = ASK_USERNAME
     await update.message.reply_text(
         "Пожалуйста, введите ваш Telegram-юзернейм\n(например: @anna)"
     )
 
+async def calc_from_notification(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data.clear()
+    context.user_data["state"] = ASK_USERNAME
+    await query.message.reply_text(
+        "Пожалуйста, введите ваш Telegram-юзернейм\n(например: @anna)"
+    )
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("state") != ASK_USERNAME:
@@ -80,6 +113,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reestr_rows = gc.open_by_key(REESTR_SHEET_ID).sheet1.get_all_records()
 
     result = {}
+    box_meta = {}
     total_kzt = total_rub = 0
 
     for box in reestr_rows:
@@ -88,8 +122,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         box_name = box.get("Название коробки")
         box_url = box.get("Ссылка на таблицу")
-        if not box_url:
+        if not box_name or not box_url:
             continue
+
+        box_meta[box_name] = {
+            "deadline": box.get("Дедлайн оплаты", ""),
+            "payment": box.get("Реквизиты для оплаты", ""),
+        }
 
         sheet = gc.open_by_url(box_url).sheet1
         rows = sheet.get_all_records()
@@ -104,33 +143,76 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not result:
         await update.message.reply_text(
-            f"У {username} нет неоплаченных позиций ✅"
+            f"У {username} нет неоплаченных позиций в активных коробках ✅"
         )
         context.user_data.clear()
         return
 
-    msg = f"{username}\n\n"
+    message = f"{username}\n\n"
 
-    for box, items in result.items():
+    for box_name, items in result.items():
         box_kzt = box_rub = 0
-        msg += f"📦 {box}\n"
+        message += f"📦 {box_name}\n"
 
-        for i in items:
-            kzt = int(i.get("Цена в тенге", 0))
-            rub = int(i.get("Цена в рублях", 0))
+        for item in items:
+            kzt = int(item.get("Цена в тенге", 0))
+            rub = int(item.get("Цена в рублях", 0))
             box_kzt += kzt
             box_rub += rub
-            msg += f"{i.get('Номер разбора')} — {i.get('Название позиции')} — {kzt} ₸ / {rub} ₽\n"
 
-        msg += f"Итого по коробке: {box_kzt} ₸ / {box_rub} ₽\n\n"
+            message += (
+                f"{item.get('Номер разбора')} — {item.get('Название позиции')} — "
+                f"{kzt} ₸ / {rub} ₽\n"
+            )
+
+        message += f"Итого по коробке: {box_kzt} ₸ / {box_rub} ₽\n"
+
+        meta = box_meta.get(box_name, {})
+
+        if meta.get("deadline") and deadline_active(meta["deadline"]):
+            message += f"\n⏰ Дедлайн оплаты:\n{meta['deadline']}\n"
+
+        payment = meta.get("payment", "")
+        if payment:
+            if len(payment) > 350:
+                context.user_data[f"pay_{box_name}"] = payment
+                keyboard = InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("💳 Показать реквизиты", callback_data=f"pay:{box_name}")]]
+                )
+                await update.message.reply_text(message)
+                await update.message.reply_text(
+                    "Реквизиты скрыты", reply_markup=keyboard
+                )
+                message = ""
+            else:
+                message += f"\n💳 Реквизиты для оплаты:\n{payment}\n"
+
+        message += "\n"
         total_kzt += box_kzt
         total_rub += box_rub
 
-    msg += f"💰 *Общая сумма к оплате:*\n*{total_kzt} ₸ / {total_rub} ₽*"
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    if message:
+        message += f"💰 *Общая сумма к оплате:*\n*{total_kzt} ₸ / {total_rub} ₽*"
+        await update.message.reply_text(message, parse_mode="Markdown")
+    else:
+        await update.message.reply_text(
+            f"💰 *Общая сумма к оплате:*\n*{total_kzt} ₸ / {total_rub} ₽*",
+            parse_mode="Markdown",
+        )
+
     context.user_data.clear()
 
+async def show_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    box_name = query.data.split("pay:")[1]
+    payment = context.user_data.get(f"pay_{box_name}")
+    if payment:
+        await query.message.reply_text(f"💳 Реквизиты для оплаты:\n{payment}")
+    else:
+        await query.message.reply_text("Реквизиты не найдены")
 
+# ================= NOTIFICATIONS =================
 async def notify_loop(app):
     while True:
         try:
@@ -143,15 +225,31 @@ async def notify_loop(app):
                 if r.get("Активна", "").lower() == "да"
             ]
 
-            new = [x for x in active if x not in known]
-            if new:
+            new_boxes = [b for b in active if b not in known]
+
+            if new_boxes:
                 users = load_json(USERS_FILE, [])
-                for box in new:
-                    name = box.split("|")[0]
+                for box in new_boxes:
+                    box_name, box_url = box.split("|", 1)
+
+                    text = (
+                        "📦 Вышла новая коробка!\n"
+                        "Проверь себя по юзернейму или я могу посчитать за тебя ❤️\n\n"
+                        f"{box_name}\n{box_url}"
+                    )
+
+                    keyboard = InlineKeyboardMarkup(
+                        [[InlineKeyboardButton("📦 Посчитать мою сумму", callback_data="calc")]]
+                    )
+
                     for uid in users:
                         await app.bot.send_message(
-                            uid, f"📦 *Новая активная коробка!*\n\n{name}", parse_mode="Markdown"
+                            uid,
+                            text,
+                            reply_markup=keyboard,
+                            disable_web_page_preview=True,
                         )
+
                 save_json(BOXES_FILE, active)
 
         except Exception as e:
@@ -159,11 +257,10 @@ async def notify_loop(app):
 
         await asyncio.sleep(600)
 
-
 async def post_init(app):
     asyncio.create_task(notify_loop(app))
 
-
+# ================= MAIN =================
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
 
@@ -174,11 +271,12 @@ def main():
             ask_username,
         )
     )
+    app.add_handler(CallbackQueryHandler(calc_from_notification, pattern="^calc$"))
+    app.add_handler(CallbackQueryHandler(show_payment, pattern="^pay:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     print("Bot started safely 🚀")
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()
