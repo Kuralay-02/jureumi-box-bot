@@ -71,7 +71,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reestr_rows = gc.open_by_key(REESTR_SHEET_ID).sheet1.get_all_records()
 
     result = {}
-    box_meta = {}  # дедлайн + реквизиты
+    box_meta = {}
     total_kzt = 0
     total_rub = 0
 
@@ -109,7 +109,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
         return
 
-    # ===== формируем ответ =====
+    # ===== формируем сообщение =====
     message = f"{username}\n\n"
 
     for box_name, items in result.items():
@@ -132,9 +132,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"{kzt} ₸ / {rub} ₽\n"
             )
 
-        message += (
-            f"Итого по коробке: {box_sum_kzt} ₸ / {box_sum_rub} ₽\n"
-        )
+        message += f"Итого по коробке: {box_sum_kzt} ₸ / {box_sum_rub} ₽\n"
 
         meta = box_meta.get(box_name, {})
         if meta.get("deadline"):
@@ -147,12 +145,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total_kzt += box_sum_kzt
         total_rub += box_sum_rub
 
+    # ===== ЖИРНАЯ ОБЩАЯ СУММА =====
     message += (
-        f"💰 Общая сумма к оплате:\n"
-        f"{total_kzt} ₸ / {total_rub} ₽"
+        f"💰 *Общая сумма к оплате:*\n"
+        f"*{total_kzt} ₸ / {total_rub} ₽*"
     )
 
-    await update.message.reply_text(message)
+    await update.message.reply_text(message, parse_mode="Markdown")
     context.user_data.clear()
 
 
@@ -170,7 +169,7 @@ def main():
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text)
     )
 
-    print("Bot is ready with deadlines & payments 🚀")
+    print("Bot is fully ready 🚀")
     app.run_polling()
 
 
