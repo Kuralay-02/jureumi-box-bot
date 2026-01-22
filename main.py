@@ -187,16 +187,22 @@ async def notify_new_boxes(app):
 
 # ================== ЗАПУСК ==================
 
-async def main():
+def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_user))
 
-    asyncio.create_task(notify_new_boxes(app))
+    app.job_queue.run_repeating(
+        notify_new_boxes,
+        interval=60,
+        first=5
+    )
 
-    await app.run_polling()
+    app.run_polling()
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
+
