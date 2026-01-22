@@ -61,77 +61,89 @@ async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data["waiting_username"] = False
 
-    try:
-        registry_sheet = gc.open_by_url(REGISTRY_SHEET_URL).sheet1
-        registry_rows = registry_sheet.get_all_records()
-    except Exception:
-        await update.message.reply_text("Ошибка доступа к реестру 😢")
-        return
+    registry = gc.open_by_url(REGISTRY_SHEET_URL).sheet1
+    registry_rows = registry.get_all_records()
 
-    found_rows = []
+    total_kzt = 0
+    total_rub = 0
+    found_any = False
+    box_blocks = []
 
-    # === ГЛАВНОЕ: идём по РЕЕСТРУ → КОРОБКАМ ===
+    requisites_text = None
+
     for reg in registry_rows:
-        active = str(reg.get("Активна", "")).strip().lower()
-        if active != "да":
+        if str(reg.get("Активна", "")).lower() != "да":
             continue
 
-        box_url = reg.get("Ссылка на таблицу")
-        if not box_url:
-            continue
+        box_name = reg.get("Название коробки")
+        sheet_url = reg.get("Ссылка на таблицу")
+        deadline = reg.get("Дедлайн оплаты")
+        requisites = reg.get("Реквизиты для оплаты")
+
+        if requisites and not requisites_text:
+            requisites_text = requisites
 
         try:
-            box_sheet = gc.open_by_url(box_url).sheet1
-            box_rows = box_sheet.get_all_values()[1:]  # без заголовков
+            sheet = gc.open_by_url(sheet_url).sheet1
+            rows = sheet.get_all_values()[1:]
         except Exception:
             continue
 
-        for r in box_rows:
+        box_lines = []
+        box_kzt = 0
+        box_rub = 0
+
+        for r in rows:
             if len(r) < 5:
                 continue
 
-            tg_nick = str(r[2]).strip().lower()  # колонка C
-            if tg_nick == username:
-                found_rows.append(r)
+            tg_nick = str(r[2]).strip().lower()
+            if tg_nick != username:
+                continue
 
-    if not found_rows:
+            found_any = True
+
+            num = r[0]
+            name = r[1]
+            kzt = int(r[3]) if r[3] else 0
+            rub = int(r[4]) if r[4] else 0
+
+            box_kzt += kzt
+            box_rub += rub
+
+            box_lines.append(
+                f"• {num} — {name}\n  {kzt} ₸ / {rub} ₽"
+            )
+
+        if box_lines:
+            total_kzt += box_kzt
+            total_rub += box_rub
+
+            block = (
+                f"📦 **{box_name}**\n"
+                + "\n".join(box_lines)
+                + f"\n⏰ Дедлайн: {deadline}"
+                + "\n🧾 Чек отправить в @jureumireceiptsbot"
+            )
+
+            box_blocks.append(block)
+
+    if not found_any:
         await update.message.reply_text(
             f"По юзернейму {username} я ничего не нашла 🤍"
         )
         return
 
-    total_kzt = 0
-    total_rub = 0
-    lines = []
+    final_text = f"👤 **{username}**\n\n"
+    final_text += "\n\n".join(box_blocks)
 
-    for r in found_rows:
-        box_num = r[0]
-        name = r[1]
+    if requisites_text:
+        final_text += f"\n\n💳 **Реквизиты для оплаты:**\n{requisites_text}"
 
-        try:
-            kzt = int(str(r[3]).replace(" ", "") or 0)
-        except:
-            kzt = 0
+    final_text += f"\n\n💰 **Итого к оплате:**\n**{total_kzt} ₸ / {total_rub} ₽**"
 
-        try:
-            rub = int(str(r[4]).replace(" ", "") or 0)
-        except:
-            rub = 0
+    await update.message.reply_text(final_text, parse_mode="Markdown")
 
-        total_kzt += kzt
-        total_rub += rub
-
-        lines.append(
-            f"• {box_num} — {name}\n  {kzt} ₸ / {rub} ₽"
-        )
-
-    text = (
-        f"📦 Найдено позиций: {len(found_rows)}\n\n"
-        + "\n\n".join(lines)
-        + f"\n\n💰 Итого:\n{total_kzt} ₸ / {total_rub} ₽"
-    )
-
-    await update.message.reply_text(text)
 
 # ================== MAIN ==================
 def main():
