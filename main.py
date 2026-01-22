@@ -31,6 +31,28 @@ scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
 gc = gspread.authorize(creds)
 
+def get_new_boxes_from_registry():
+    sheet = gc.open_by_url(REGISTRY_SHEET_URL).sheet1
+    rows = sheet.get_all_records()
+
+    new_boxes = []
+
+    for row in rows:
+        if str(row.get("Активна", "")).strip().lower() != "да":
+            continue
+
+        if str(row.get("Уведомление отправлено", "")).strip().lower() == "да":
+            continue
+
+        new_boxes.append({
+            "name": row.get("Название коробки"),
+            "link": row.get("Ссылка на таблицу"),
+            "deadline": row.get("Дедлайн оплаты"),
+        })
+
+    return new_boxes
+
+
 # ================== START ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
