@@ -11,18 +11,17 @@ from telegram.ext import (
     filters,
 )
 
+# ===== ENV =====
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GOOGLE_CREDENTIALS = os.getenv("GOOGLE_CREDENTIALS")
 
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN not found")
+if not BOT_TOKEN or not GOOGLE_CREDENTIALS:
+    raise RuntimeError("ENV variables not found")
 
-if not GOOGLE_CREDENTIALS:
-    raise RuntimeError("GOOGLE_CREDENTIALS not found")
-
+# ===== STATES =====
 ASK_USERNAME = "ask_username"
 
-# --- Google setup ---
+# ===== GOOGLE SETUP =====
 creds_dict = json.loads(GOOGLE_CREDENTIALS)
 scopes = [
     "https://www.googleapis.com/auth/spreadsheets.readonly",
@@ -31,9 +30,11 @@ scopes = [
 credentials = Credentials.from_service_account_info(creds_dict, scopes=scopes)
 gc = gspread.authorize(credentials)
 
+# 👉 ID РЕЕСТРА КОРОБОК
 REESTR_SHEET_ID = "1OoNWbRIvj23dAwVC75RMf7SrNqzGHjFuIdB-jwTntQc"
 
 
+# ===== HANDLERS =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["📦 Посчитать мою сумму к оплате доставки до админа"]]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -55,40 +56,84 @@ async def ask_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    state = context.user_data.get("state")
-
-    if state != ASK_USERNAME:
-        await update.message.reply_text("Пожалуйста, нажмите кнопку ниже 👇")
+    if context.user_data.get("state") != ASK_USERNAME:
         return
 
     username = update.message.text.strip()
 
-    if not username.startswith("@") or len(username) < 3:
+    if not username.startswith("@"):
         await update.message.reply_text(
-            "Пожалуйста, введите юзернейм в формате @username"
+            "Введите юзернейм в формате @username"
         )
         return
 
-    # --- Читаем реестр коробок ---
-    sh = gc.open_by_key(REESTR_SHEET_ID)
-    ws = sh.sheet1
-    rows = ws.get_all_records()
+    # --- читаем реестр коробок ---
+    reestr_rows = gc.open_by_key(REESTR_SHEET_ID).sheet1.get_all_records()
 
-    active_boxes = [
-        row["Название коробки"]
-        for row in rows
-        if row.get("Активна", "").lower() == "да"
-    ]
+    result = {}
+    total_kzt = 0
+    total_rub = 0
 
-    if not active_boxes:
-        await update.message.reply_text("Сейчас нет активных коробок.")
-    else:
-        boxes_text = "\n".join(f"• {box}" for box in active_boxes)
+    for box in reestr_rows:
+        if box.get("Активна", "").lower() != "да":
+            continue
+
+        box_name = box.get("Название коробки")
+        box_url = box.get("Ссылка на таблицу")
+
+        if not box_url:
+            continue
+
+        # --- читаем таблицу коробки ---
+        sheet = gc.open_by_url(box_url).sheet1
+        rows = sheet.get_all_records()
+
+        for row in rows:
+            if (
+                row.get("Ник в тг") == username
+                and row.get("Статус оплаты") == "не оплачено"
+            ):
+                result.setdefault(box_name, []).append(row)
+
+    if not result:
         await update.message.reply_text(
-            f"Юзернейм {username} принят ✅\n\n"
-            f"Активные коробки:\n{boxes_text}"
+            f"У {username} нет неоплаченных позиций в активных коробках ✅"
+        )
+        context.user_data.clear()
+        return
+
+    # --- формируем сообщение ---
+    message = f"{username}\n\n"
+
+    for box_name, items in result.items():
+        box_sum_kzt = 0
+        box_sum_rub = 0
+
+        message += f"📦 {box_name}\n"
+
+        for item in items:
+            kzt = int(item.get("Цена в тенге", 0))
+            rub = int(item.get("Цена в рублях", 0))
+
+            box_sum_kzt += kzt
+            box_sum_rub += rub
+
+            message += (
+                f"#{item.get('Номер разбора')} — "
+                f"{item.get('Название позиции')} — "
+                f"{kzt} ₸ / {rub} ₽\n"
+            )
+
+        message += (
+            f"Итого по коробке: {box_sum_kzt} ₸ / {box_sum_rub} ₽\n\n"
         )
 
+        total_kzt += box_sum_kzt
+        total_rub += box_sum_rub
+
+    message += f"💰 Общая сумма к оплате:\n{total_kzt} ₸ / {total_rub} ₽"
+
+    await update.message.reply_text(message)
     context.user_data.clear()
 
 
@@ -106,7 +151,7 @@ def main():
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text)
     )
 
-    print("Bot started with Google access...")
+    print("Bot is fully ready 🚀")
     app.run_polling()
 
 
