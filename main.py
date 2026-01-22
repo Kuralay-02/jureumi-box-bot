@@ -81,10 +81,9 @@ async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Ошибка доступа к таблице 😢")
         return
 
-    # --- поиск по колонке C (Ник в тг) ---
     user_rows = []
     for r in raw_rows:
-        tg_nick = str(r[2]).strip().lower()  # C
+        tg_nick = str(r[2]).strip().lower()  # колонка C — Ник в тг
         if tg_nick == username:
             user_rows.append(r)
 
@@ -99,32 +98,28 @@ async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = []
 
     for r in user_rows:
-        num = r[0]                 # A — Номер разбора
-        name = r[1]                # B — Название позиции
-        price_kzt = int(r[3] or 0) # D — Цена в тенге
-        price_rub = int(r[4] or 0) # E — Цена в рублях
+        box_num = r[0]
+        item_name = r[1]
+        price_kzt = int(r[3]) if r[3].isdigit() else 0
+        price_rub = int(r[4]) if r[4].isdigit() else 0
 
         total_kzt += price_kzt
         total_rub += price_rub
 
         lines.append(
-            f"📦 *Разбор:* {num}\n"
-            f"• {name}\n"
-            f"• {price_kzt} ₸ / {price_rub} ₽"
+            f"📦 Разбор {box_num}\n"
+            f"{item_name}\n"
+            f"— {price_kzt} ₸ / {price_rub} ₽"
         )
 
     text = (
         f"Нашла для {username}:\n\n"
         + "\n\n".join(lines)
-        + "\n\n"
-        f"*Итого к оплате:*\n"
-        f"**{total_kzt} ₸ / {total_rub} ₽**"
+        + f"\n\n💰 Итого:\n{total_kzt} ₸ / {total_rub} ₽"
     )
 
-    await update.message.reply_text(
-        text,
-        parse_mode="Markdown"
-    )
+    await update.message.reply_text(text)
+
 
 # ================== ЗАПУСК ==================
 
