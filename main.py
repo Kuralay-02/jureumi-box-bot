@@ -1,20 +1,11 @@
 import os
 import json
-import asyncio
-from datetime import datetime
-
 import gspread
 from google.oauth2.service_account import Credentials
-
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
+from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
-    CallbackQueryHandler,
     MessageHandler,
     ContextTypes,
     filters,
@@ -22,168 +13,111 @@ from telegram.ext import (
 
 # ================== НАСТРОЙКИ ==================
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-REGISTRY_SHEET_URL = os.getenv("REGISTRY_SHEET_URL")
-GOOGLE_CREDENTIALS = os.getenv("GOOGLE_CREDENTIALS")
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+REGISTRY_SHEET_URL = os.environ["REGISTRY_SHEET_URL"]
+GOOGLE_CREDENTIALS = json.loads(os.environ["GOOGLE_CREDENTIALS"])
 
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
 
-# ================== GOOGLE SHEETS ==================
+# ================== GOOGLE ==================
 
-creds_dict = json.loads(GOOGLE_CREDENTIALS)
-creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+creds = Credentials.from_service_account_info(
+    GOOGLE_CREDENTIALS, scopes=SCOPES
+)
 gc = gspread.authorize(creds)
 
-registry_sheet = gc.open_by_url(REGISTRY_SHEET_URL).sheet1
+# ================== КЛАВИАТУРА ==================
 
-# ================== ХРАНЕНИЕ ==================
+MAIN_KEYBOARD = ReplyKeyboardMarkup(
+    [["📦 Посчитать мою сумму к оплате доставки до админа"]],
+    resize_keyboard=True
+)
 
-users = set()
-known_boxes = set()
-awaiting_username = set()
-
-# ================== КОМАНДЫ ==================
+# ================== /start ==================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    users.add(chat_id)
-
-    keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("📦 Посчитать мою сумму", callback_data="calc")]]
-    )
-
     await update.message.reply_text(
         "Здравствуйте!\n\n"
-        "Я уведомляю о новых коробках и считаю сумму к оплате 💸",
-        reply_markup=keyboard,
+        "Я помогу посчитать сумму к оплате.\n"
+        "Нажмите кнопку ниже 👇",
+        reply_markup=MAIN_KEYBOARD,
     )
+    context.user_data.clear()
 
-# ================== КНОПКИ ==================
+# ================== КНОПКА ==================
 
-async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    if query.data == "calc":
-        awaiting_username.add(query.message.chat.id)
-        await query.message.reply_text(
+async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if "посчитать" in update.message.text.lower():
+        context.user_data["waiting_username"] = True
+        await update.message.reply_text(
             "Пожалуйста, введите ваш Telegram-юзернейм\n"
             "(например: @anna)"
         )
 
-# ================== ВВОД ЮЗЕРНЕЙМА ==================
+# ================== ЮЗЕРНЕЙМ ==================
 
-async def handle_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    text = update.message.text.strip()
-
-    if chat_id not in awaiting_username:
+async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get("waiting_username"):
         return
 
-    if not text.startswith("@"):
+    username = update.message.text.strip().lower()
+    if not username.startswith("@"):
+        username = "@" + username
+
+    context.user_data["waiting_username"] = False
+
+    try:
+        sheet = gc.open_by_url(REGISTRY_SHEET_URL).sheet1
+        rows = sheet.get_all_records()
+    except Exception:
+        await update.message.reply_text("Ошибка доступа к таблице 🥲")
+        return
+
+    user_rows = [
+        r for r in rows
+        if str(r.get("Ник в тг", "")).strip().lower() == username
+    ]
+
+    if not user_rows:
         await update.message.reply_text(
-            "Юзернейм должен начинаться с @\n"
-            "Например: @anna"
+            f"По юзернейму {username} я ничего не нашла 🤍"
         )
         return
 
-    awaiting_username.remove(chat_id)
-    username = text.lower()
+    total_kzt = 0
+    total_rub = 0
+    lines = []
 
-    await calculate_sum(update, username)
+    for r in user_rows:
+        num = r.get("Номер разбора", "")
+        name = r.get("Название позиции", "")
+        kzt = int(r.get("Цена в тенге", 0) or 0)
+        rub = int(r.get("Цена в рублях", 0) or 0)
 
-# ================== ПОДСЧЁТ СУММЫ ==================
+        total_kzt += kzt
+        total_rub += rub
 
-async def calculate_sum(update: Update, username: str):
-    total = 0
-    boxes_found = []
-
-    rows = registry_sheet.get_all_records()
-
-    for row in rows:
-        if str(row.get("Активна")).lower() != "да":
-            continue
-
-        sheet_url = row.get("Ссылка на таблицу")
-        box_name = row.get("Название коробки")
-
-        try:
-            sheet = gc.open_by_url(sheet_url).sheet1
-            data = sheet.get_all_records()
-        except Exception:
-            continue
-
-        for item in data:
-            user = str(item.get("username", "")).lower()
-            price = item.get("sum")
-
-            if user == username:
-                try:
-                    total += float(price)
-                    boxes_found.append(box_name)
-                except Exception:
-                    pass
-
-    if total == 0:
-        await update.message.reply_text(
-            f"По юзернейму {username} я ничего не нашла 🫶"
+        lines.append(
+            f"• #{num} — {name}\n"
+            f"  {kzt} ₸ / {rub} ₽"
         )
-        return
 
     text = (
-        f"📦 Найдено в коробках:\n"
-        f"{', '.join(set(boxes_found))}\n\n"
-        f"💰 *Итого к оплате:* **{int(total)}**"
+        f"{username}\n\n"
+        + "\n\n".join(lines)
+        + "\n\n"
+        f"💰 *Общая сумма к оплате:*\n"
+        f"*{total_kzt} ₸ / {total_rub} ₽*"
     )
 
     await update.message.reply_text(
         text,
         parse_mode="Markdown",
+        reply_markup=MAIN_KEYBOARD
     )
-
-# ================== УВЕДОМЛЕНИЯ О НОВЫХ КОРОБКАХ ==================
-
-async def notify_new_boxes(app):
-    while True:
-        rows = registry_sheet.get_all_records()
-
-        for row in rows:
-            if str(row.get("Активна")).lower() != "да":
-                continue
-
-            box_name = row.get("Название коробки")
-            link = row.get("Ссылка на таблицу")
-            deadline = row.get("Дедлайн оплаты")
-
-            key = f"{box_name}|{link}"
-            if key in known_boxes:
-                continue
-
-            known_boxes.add(key)
-
-            text = (
-                "📦 *Вышла новая коробка!*\n"
-                "Проверь себя по юзернейму или я могу посчитать за тебя ❤️\n\n"
-                f"*{box_name}*\n{link}\n\n"
-                f"⏰ Дедлайн: {deadline}"
-            )
-
-            keyboard = InlineKeyboardMarkup(
-                [[InlineKeyboardButton("📦 Посчитать мою сумму", callback_data="calc")]]
-            )
-
-            for chat_id in users:
-                try:
-                    await app.bot.send_message(
-                        chat_id=chat_id,
-                        text=text,
-                        reply_markup=keyboard,
-                        parse_mode="Markdown",
-                    )
-                except Exception:
-                    pass
-
-        await asyncio.sleep(30)
 
 # ================== ЗАПУСК ==================
 
@@ -191,18 +125,10 @@ def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(on_button))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_user))
-
-    app.job_queue.run_repeating(
-        notify_new_boxes,
-        interval=60,
-        first=5
-    )
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_button))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_username))
 
     app.run_polling()
 
-
 if __name__ == "__main__":
     main()
-
