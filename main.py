@@ -18,6 +18,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+ADMIN_ID = 635801439
 SUBSCRIBERS = set()
 
 # ================== ENV ==================
@@ -59,16 +60,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     SUBSCRIBERS.add(chat_id)
 
-   buttons = [
-    [InlineKeyboardButton("📦 Посчитать мою сумму", callback_data="calc")]
-]
+    buttons = [
+        [InlineKeyboardButton("📦 Посчитать мою сумму", callback_data="calc")]
+    ]
 
-if chat_id == ADMIN_CHAT_ID:
-    buttons.append(
-        [InlineKeyboardButton("📣 Разослать уведомление", callback_data="notify")]
-    )
+    if chat_id == ADMIN_CHAT_ID:
+        buttons.append(
+            [InlineKeyboardButton("📣 Разослать уведомление", callback_data="notify")]
+        )
 
-keyboard = InlineKeyboardMarkup(buttons)
+    keyboard = InlineKeyboardMarkup(buttons)
 
     await update.message.reply_text(
         "Здравствуйте!\n\nЯ помогу посчитать сумму к оплате.\nНажмите кнопку ниже 👇",
