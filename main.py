@@ -30,7 +30,7 @@ scopes = [
 credentials = Credentials.from_service_account_info(creds_dict, scopes=scopes)
 gc = gspread.authorize(credentials)
 
-# 👉 ID РЕЕСТРА КОРОБОК
+# 👉 ID реестра коробок
 REESTR_SHEET_ID = "1OoNWbRIvj23dAwVC75RMf7SrNqzGHjFuIdB-jwTntQc"
 
 # ================= HANDLERS =================
@@ -71,6 +71,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reestr_rows = gc.open_by_key(REESTR_SHEET_ID).sheet1.get_all_records()
 
     result = {}
+    box_meta = {}  # дедлайн + реквизиты
     total_kzt = 0
     total_rub = 0
 
@@ -85,10 +86,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not box_url:
             continue
 
+        box_meta[box_name] = {
+            "deadline": box.get("Дедлайн оплаты", ""),
+            "payment": box.get("Реквизиты для оплаты", ""),
+        }
+
         sheet = gc.open_by_url(box_url).sheet1
         rows = sheet.get_all_records()
 
-        # ===== ищем позиции пользователя =====
         for row in rows:
             if row.get("Ник в тг") != username:
                 continue
@@ -120,7 +125,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             box_sum_kzt += kzt
             box_sum_rub += rub
 
-            # номер разбора выводим КАК ЕСТЬ (без добавления #)
             razbor = str(item.get("Номер разбора", "")).strip()
 
             message += (
@@ -129,8 +133,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         message += (
-            f"Итого по коробке: {box_sum_kzt} ₸ / {box_sum_rub} ₽\n\n"
+            f"Итого по коробке: {box_sum_kzt} ₸ / {box_sum_rub} ₽\n"
         )
+
+        meta = box_meta.get(box_name, {})
+        if meta.get("deadline"):
+            message += f"\n⏰ Дедлайн оплаты:\n{meta['deadline']}\n"
+        if meta.get("payment"):
+            message += f"\n💳 Реквизиты для оплаты:\n{meta['payment']}\n"
+
+        message += "\n"
 
         total_kzt += box_sum_kzt
         total_rub += box_sum_rub
@@ -158,7 +170,7 @@ def main():
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text)
     )
 
-    print("Bot is fully ready 🚀")
+    print("Bot is ready with deadlines & payments 🚀")
     app.run_polling()
 
 
