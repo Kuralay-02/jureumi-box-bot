@@ -18,6 +18,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+SUBSCRIBERS = set()
 
 # ================== ENV ==================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -32,6 +33,9 @@ gc = gspread.authorize(creds)
 
 # ================== START ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    SUBSCRIBERS.add(chat_id)
+
     keyboard = InlineKeyboardMarkup(
         [[InlineKeyboardButton("📦 Посчитать мою сумму", callback_data="calc")]]
     )
