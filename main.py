@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 import pytz
 
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2.service_account import Credentials
 
 from telegram import (
     Update,
