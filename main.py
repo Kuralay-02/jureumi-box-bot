@@ -26,7 +26,7 @@ credentials = Credentials.from_service_account_info(
 gc = gspread.authorize(credentials)
 
 # 3. Открываем реестр коробок
-SPREADSHEET_ID = "ВСТАВЬ_ID_РЕЕСТРА"
+SPREADSHEET_ID = "1OoNWbRIvj23dAwVC75RMf7SrNqzGHjFuIdB-jwTntQc"
 
 sh = gc.open_by_key(SPREADSHEET_ID)
 worksheet = sh.sheet1
