@@ -35,11 +35,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = InlineKeyboardMarkup(
         [[InlineKeyboardButton("📦 Посчитать мою сумму", callback_data="calc")]]
     )
-    await update.message.reply_text(
-    "Здравствуйте!\n\nЯ помогу посчитать сумму к оплате.\nНажмите кнопку ниже 👇",
-    reply_markup=ReplyKeyboardRemove()
-)
 
+    await update.message.reply_text(
+        "Здравствуйте!\n\nЯ помогу посчитать сумму к оплате.\nНажмите кнопку ниже 👇",
+        reply_markup=keyboard
+    )
 
 # ================== BUTTON ==================
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -49,7 +49,8 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "calc":
         context.user_data["waiting_username"] = True
         await query.message.reply_text(
-            "Пожалуйста, введите ваш Telegram-юзернейм\n(например: @anna)"
+            "Пожалуйста, введите ваш Telegram-юзернейм\n(например: @anna)",
+            reply_markup=ReplyKeyboardRemove()
         )
 
 # ================== USERNAME ==================
