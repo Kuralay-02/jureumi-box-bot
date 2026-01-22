@@ -1,6 +1,5 @@
 import os
 import json
-import asyncio
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -145,4 +144,5 @@ async def main():
     await app.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
+
