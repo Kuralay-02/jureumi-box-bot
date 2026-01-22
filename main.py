@@ -214,7 +214,7 @@ async def notify_loop(app):
         except Exception as e:
             print("Notify error:", e)
 
-        await asyncio.sleep(600)
+        await asyncio.sleep(60)
 
 
 async def post_init(app):
