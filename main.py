@@ -11,17 +11,17 @@ from telegram.ext import (
     filters,
 )
 
-# ===== ENV =====
+# ================= ENV =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GOOGLE_CREDENTIALS = os.getenv("GOOGLE_CREDENTIALS")
 
 if not BOT_TOKEN or not GOOGLE_CREDENTIALS:
     raise RuntimeError("ENV variables not found")
 
-# ===== STATES =====
+# ================= STATE =================
 ASK_USERNAME = "ask_username"
 
-# ===== GOOGLE SETUP =====
+# ================= GOOGLE =================
 creds_dict = json.loads(GOOGLE_CREDENTIALS)
 scopes = [
     "https://www.googleapis.com/auth/spreadsheets.readonly",
@@ -33,11 +33,12 @@ gc = gspread.authorize(credentials)
 # 👉 ID РЕЕСТРА КОРОБОК
 REESTR_SHEET_ID = "1OoNWbRIvj23dAwVC75RMf7SrNqzGHjFuIdB-jwTntQc"
 
-
-# ===== HANDLERS =====
+# ================= HANDLERS =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["📦 Посчитать мою сумму к оплате доставки до админа"]]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    reply_markup = ReplyKeyboardMarkup(
+        keyboard, resize_keyboard=True, one_time_keyboard=True
+    )
 
     await update.message.reply_text(
         "Здравствуйте!\n"
@@ -67,13 +68,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # --- читаем реестр коробок ---
     reestr_rows = gc.open_by_key(REESTR_SHEET_ID).sheet1.get_all_records()
 
     result = {}
     total_kzt = 0
     total_rub = 0
 
+    # ===== проходим по активным коробкам =====
     for box in reestr_rows:
         if box.get("Активна", "").lower() != "да":
             continue
@@ -84,16 +85,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not box_url:
             continue
 
-        # --- читаем таблицу коробки ---
         sheet = gc.open_by_url(box_url).sheet1
         rows = sheet.get_all_records()
 
+        # ===== ищем позиции пользователя =====
         for row in rows:
-            if (
-                row.get("Ник в тг") == username
-                and row.get("Статус оплаты") == "не оплачено"
-            ):
-                result.setdefault(box_name, []).append(row)
+            if row.get("Ник в тг") != username:
+                continue
+            if row.get("Статус оплаты") != "не оплачено":
+                continue
+
+            result.setdefault(box_name, []).append(row)
 
     if not result:
         await update.message.reply_text(
@@ -102,7 +104,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
         return
 
-    # --- формируем сообщение ---
+    # ===== формируем ответ =====
     message = f"{username}\n\n"
 
     for box_name, items in result.items():
@@ -118,9 +120,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             box_sum_kzt += kzt
             box_sum_rub += rub
 
+            # номер разбора выводим КАК ЕСТЬ (без добавления #)
+            razbor = str(item.get("Номер разбора", "")).strip()
+
             message += (
-                f"#{item.get('Номер разбора')} — "
-                f"{item.get('Название позиции')} — "
+                f"{razbor} — {item.get('Название позиции')} — "
                 f"{kzt} ₸ / {rub} ₽\n"
             )
 
@@ -131,7 +135,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total_kzt += box_sum_kzt
         total_rub += box_sum_rub
 
-    message += f"💰 Общая сумма к оплате:\n{total_kzt} ₸ / {total_rub} ₽"
+    message += (
+        f"💰 Общая сумма к оплате:\n"
+        f"{total_kzt} ₸ / {total_rub} ₽"
+    )
 
     await update.message.reply_text(message)
     context.user_data.clear()
