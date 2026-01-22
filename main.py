@@ -67,6 +67,12 @@ def build_box_notification_text(box):
         f"⏰ Дедлайн: {deadline}\n\n"
         "👉 Нажми кнопку ниже, чтобы посчитать сумму"
     )
+    
+def build_box_notification_keyboard():
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("📦 Посчитать сумму", callback_data="calc")]]
+    )
+
 
 
 
