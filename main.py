@@ -141,7 +141,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = build_box_notification_text(box)
             keyboard = build_box_notification_keyboard()
 
-            for chat_id in [ADMIN_CHAT_ID]:
+            for chat_id in SUBSCRIBERS:
                 try:
                     await context.bot.send_message(
                         chat_id=chat_id,
