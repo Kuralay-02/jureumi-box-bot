@@ -368,6 +368,10 @@ async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if tg_nick != username:
                 continue
 
+            payment_status = str(r[5]).strip().lower() if len(r) > 5 else ""
+            if payment_status == "оплачено":
+                continue
+
             found_any = True
 
             num = r[0]
