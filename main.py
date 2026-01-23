@@ -22,6 +22,11 @@ from telegram.ext import (
 ADMIN_CHAT_ID = 635801439
 SUBSCRIBERS = set()
 
+def normalize_username (u):
+    if not u:
+        return ""
+    return str(u).strip().lower().lstrip("@")
+    
 # ================== ENV ==================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 REGISTRY_SHEET_URL = os.getenv("REGISTRY_SHEET_URL")
@@ -364,7 +369,9 @@ async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if len(r) < 5:
                 continue
 
-            tg_nick = str(r[2]).strip().lower()
+            tg_nick = normalize_username(r[2])
+            user_nick = normalize_username(username)
+            
             if tg_nick != username:
                 continue
 
