@@ -22,10 +22,13 @@ from telegram.ext import (
 ADMIN_CHAT_ID = 635801439
 SUBSCRIBERS = set()
 
-def normalize_username (u):
+def normalize_username(u):
     if not u:
         return ""
-    return str(u).strip().lower().lstrip("@")
+    u = str(u).strip().lower()
+    if not u.startswith("@"):
+        u = "@" + u
+    return u
     
 # ================== ENV ==================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -326,10 +329,8 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get("waiting_username"):
         return
-
-    username = update.message.text.strip().lower()
-    if not username.startswith("@"):
-        username = "@" + username
+        
+    username = normalize_username(update.message.text)
 
     context.user_data["waiting_username"] = False
 
@@ -372,7 +373,7 @@ async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
             tg_nick = normalize_username(r[2])
             user_nick = normalize_username(username)
             
-            if tg_nick != username:
+           if tg_nick != user_nick:
                 continue
 
             payment_status = str(r[5]).strip().lower() if len(r) > 5 else ""
