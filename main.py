@@ -373,7 +373,7 @@ async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
             tg_nick = normalize_username(r[2])
             user_nick = normalize_username(username)
             
-           if tg_nick != user_nick:
+            if tg_nick != user_nick:
                 continue
 
             payment_status = str(r[5]).strip().lower() if len(r) > 5 else ""
