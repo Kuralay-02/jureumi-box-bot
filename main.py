@@ -402,8 +402,6 @@ async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"📦 **{box_name}**\n"
                 + "\n".join(box_lines)
                 + f"\n⏰ Дедлайн: {deadline}"
-                + "\n🧾 Чек отправить в @jureumireceiptsbot"
-            )
 
             box_blocks.append(block)
 
