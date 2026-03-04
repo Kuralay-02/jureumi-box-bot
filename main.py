@@ -506,20 +506,26 @@ async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    final_text = f"👤 **{safe_username}**\n\n"
-    final_text += "\n\n".join(box_blocks)
+    positions_text = f"👤 **{safe_username}**\n\n"
+    positions_text += "\n\n".join(box_blocks)
+
+# сначала отправляем позиции (разбивая на части)
+    for part in split_message(positions_text):
+        await update.message.reply_text(part, parse_mode="Markdown")
+
+# потом отдельным последним сообщением итог
+    summary_text = ""
 
     if requisites_text:
-        final_text += f"\n\n💳 **Реквизиты для оплаты:**\n{escape_md(requisites_text)}"
+        summary_text += f"💳 **Реквизиты для оплаты:**\n{escape_md(requisites_text)}\n\n"
 
-    final_text += (
-        f"\n\n💰 **Итого к оплате:**\n"
+    summary_text += (
+        "━━━━━━━━━━━━\n"
+        f"💰 **Итого к оплате:**\n"
         f"**{total_kzt} ₸ / {total_rub} ₽**"
     )
 
-    # ✅ Отправка частями, чтобы не ловить "Message is too long"
-    for part in split_message(final_text):
-        await update.message.reply_text(part, parse_mode="Markdown")
+    await update.message.reply_text(summary_text, parse_mode="Markdown")
 
 # ================== MAIN ==================
 def main():
