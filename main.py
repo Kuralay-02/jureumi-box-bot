@@ -126,10 +126,6 @@ def normalize_username(value):
 
 
 def escape_md(text: str) -> str:
-    """
-    Экранирование для обычного Telegram Markdown.
-    """
-
     if text is None:
         return ""
 
@@ -144,10 +140,6 @@ def escape_md(text: str) -> str:
 
 
 def split_message(text: str, limit: int = 4000) -> list[str]:
-    """
-    Делит длинное сообщение на части.
-    """
-
     parts = []
     remaining = text or ""
 
@@ -168,16 +160,6 @@ def split_message(text: str, limit: int = 4000) -> list[str]:
 
 
 def parse_int(value) -> int:
-    """
-    Преобразует:
-
-    1000
-    1 000
-    1000.0
-
-    в целое число.
-    """
-
     text = str(value).strip().replace(" ", "")
 
     if not text:
@@ -191,10 +173,6 @@ def parse_int(value) -> int:
 
 
 def parse_chat_id(value):
-    """
-    Безопасно преобразует Chat ID из Google Таблицы.
-    """
-
     text = str(value).strip().replace(" ", "")
 
     if not text:
@@ -222,7 +200,7 @@ ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID"))
 creds_dict = json.loads(GOOGLE_CREDS_JSON)
 
 scopes = [
-    "https://www.googleapis.com/auth/spreadsheets.readonly"
+    "https://www.googleapis.com/auth/spreadsheets"
 ]
 
 creds = Credentials.from_service_account_info(
@@ -238,37 +216,14 @@ def get_registry_spreadsheet():
 
 
 def get_registry_sheet():
-    """
-    Первый лист — реестр коробок.
-    Его название может оставаться «Лист1».
-    """
-
     return get_registry_spreadsheet().sheet1
 
 
 def get_users_sheet():
-    """
-    Второй лист должен называться:
-
-    Пользователи
-
-    Заголовки:
-    Username | Chat ID
-    """
-
     return get_registry_spreadsheet().worksheet("Пользователи")
 
 
 def get_users_map():
-    """
-    Возвращает словарь:
-
-    {
-        "@tepl0o0": 123456789,
-        "@anna": 987654321
-    }
-    """
-
     users_sheet = get_users_sheet()
     rows = users_sheet.get_all_records()
 
@@ -284,6 +239,61 @@ def get_users_map():
         users_map[username] = chat_id
 
     return users_map
+
+
+def save_user_to_sheet(username: str, chat_id: int):
+    """
+    Сохраняет пользователя в лист «Пользователи».
+
+    Не создаёт дубли:
+    - если найден тот же Chat ID — обновляет username;
+    - если найден тот же username — обновляет Chat ID;
+    - если найдено несколько совпадений — оставляет одну строку;
+    - если пользователя нет — добавляет новую строку.
+    """
+
+    username = normalize_username(username)
+    chat_id = parse_chat_id(chat_id)
+
+    if not username or not chat_id:
+        return
+
+    users_sheet = get_users_sheet()
+    rows = users_sheet.get_all_values()
+
+    matched_rows = []
+
+    for row_number, row in enumerate(rows[1:], start=2):
+        existing_username = normalize_username(
+            row[0] if len(row) > 0 else ""
+        )
+        existing_chat_id = parse_chat_id(
+            row[1] if len(row) > 1 else ""
+        )
+
+        if (
+            existing_username == username
+            or existing_chat_id == chat_id
+        ):
+            matched_rows.append(row_number)
+
+    if not matched_rows:
+        users_sheet.append_row(
+            [username, chat_id],
+            value_input_option="RAW",
+        )
+        return
+
+    main_row = matched_rows[0]
+
+    users_sheet.update(
+        range_name=f"A{main_row}:B{main_row}",
+        values=[[username, chat_id]],
+        value_input_option="RAW",
+    )
+
+    for duplicate_row in reversed(matched_rows[1:]):
+        users_sheet.delete_rows(duplicate_row)
 
 
 # ================== NEW BOXES ==================
@@ -350,29 +360,6 @@ def build_box_notification_text(box):
 # ================== UNPAID POSITIONS ==================
 
 def collect_unpaid_positions():
-    """
-    Проверяет все активные коробки.
-
-    Возвращает данные в формате:
-
-    {
-        "@username": {
-            "boxes": [
-                {
-                    "name": "...",
-                    "deadline": "...",
-                    "positions": [...],
-                    "total_kzt": 1000,
-                    "total_rub": 200
-                }
-            ],
-            "total_kzt": 1000,
-            "total_rub": 200,
-            "positions_count": 1
-        }
-    }
-    """
-
     registry_sheet = get_registry_sheet()
     registry_rows = registry_sheet.get_all_records()
 
@@ -398,10 +385,7 @@ def collect_unpaid_positions():
             rows = box_sheet.get_all_values()[1:]
 
         except Exception as error:
-            print(
-                f"Не удалось открыть коробку "
-                f"{box_name}: {error}"
-            )
+            print(f"Не удалось открыть коробку {box_name}: {error}")
             continue
 
         box_users = {}
@@ -418,9 +402,7 @@ def collect_unpaid_positions():
             payment_status = ""
 
             if len(row) > 5:
-                payment_status = str(
-                    row[5]
-                ).strip().lower()
+                payment_status = str(row[5]).strip().lower()
 
             if payment_status == "оплачено":
                 continue
@@ -468,14 +450,8 @@ def collect_unpaid_positions():
                 }
             )
 
-            unpaid_users[username]["total_kzt"] += (
-                box_data["total_kzt"]
-            )
-
-            unpaid_users[username]["total_rub"] += (
-                box_data["total_rub"]
-            )
-
+            unpaid_users[username]["total_kzt"] += box_data["total_kzt"]
+            unpaid_users[username]["total_rub"] += box_data["total_rub"]
             unpaid_users[username]["positions_count"] += len(
                 box_data["positions"]
             )
@@ -484,10 +460,6 @@ def collect_unpaid_positions():
 
 
 def build_payment_reminder_text(username, user_data):
-    """
-    Создаёт персональное сообщение для пользователя.
-    """
-
     safe_username = escape_md(username)
 
     text = (
@@ -512,8 +484,7 @@ def build_payment_reminder_text(username, user_data):
 
             position_lines.append(
                 f"• {safe_number} — {safe_name}\n"
-                f"  {position['kzt']} ₸ / "
-                f"{position['rub']} ₽"
+                f"  {position['kzt']} ₸ / {position['rub']} ₽"
             )
 
         block += "\n".join(position_lines)
@@ -538,10 +509,6 @@ def build_payment_reminder_text(username, user_data):
 
 
 def build_payment_preview(unpaid_users, users_map):
-    """
-    Формирует предпросмотр для администратора.
-    """
-
     with_chat_id = []
     without_chat_id = []
 
@@ -560,8 +527,8 @@ def build_payment_preview(unpaid_users, users_map):
 
     text = (
         "🔔 **Предпросмотр напоминания об оплате**\n\n"
-        f"👥 Всего пользователей с неоплаченными "
-        f"позициями: **{len(unpaid_users)}**\n"
+        f"👥 Всего пользователей с неоплаченными позициями: "
+        f"**{len(unpaid_users)}**\n"
         f"✅ Найдены в листе «Пользователи»: "
         f"**{len(with_chat_id)}**\n"
         f"❌ Нет Chat ID: "
@@ -643,8 +610,6 @@ async def on_button(
     chat_id = update.effective_chat.id
     ensure_subscriber(chat_id)
 
-    # ================== CALCULATE ==================
-
     if query.data == "calc":
         context.user_data["waiting_username"] = True
 
@@ -653,8 +618,6 @@ async def on_button(
             "(например: @anna)",
             reply_markup=ReplyKeyboardRemove(),
         )
-
-    # ================== NEW BOX NOTIFICATION ==================
 
     elif query.data == "notify":
         if chat_id != ADMIN_CHAT_ID:
@@ -759,7 +722,6 @@ async def on_button(
 
             except Exception as error:
                 failed += 1
-
                 print(
                     f"Не удалось отправить "
                     f"{subscriber_id}: {error}"
@@ -771,8 +733,6 @@ async def on_button(
             f"✅ Доставлено: {sent}\n"
             f"❌ Не доставлено: {failed}"
         )
-
-    # ================== PAYMENT REMINDER PREVIEW ==================
 
     elif query.data == "payment_reminder_preview":
         if chat_id != ADMIN_CHAT_ID:
@@ -813,10 +773,6 @@ async def on_button(
             )
             return
 
-        context.user_data["payment_reminder_data"] = (
-            unpaid_users
-        )
-
         preview_text = build_payment_preview(
             unpaid_users,
             users_map,
@@ -853,8 +809,6 @@ async def on_button(
                     else None
                 ),
             )
-
-    # ================== PAYMENT REMINDER SEND ==================
 
     elif query.data == "payment_reminder_send":
         if chat_id != ADMIN_CHAT_ID:
@@ -996,8 +950,6 @@ async def on_button(
                 parse_mode="Markdown",
             )
 
-    # ================== CANCEL ==================
-
     elif query.data == "cancel":
         await query.message.reply_text(
             "❌ Действие отменено"
@@ -1010,7 +962,8 @@ async def handle_username(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-    ensure_subscriber(update.effective_chat.id)
+    chat_id = update.effective_chat.id
+    ensure_subscriber(chat_id)
 
     if not context.user_data.get("waiting_username"):
         return
@@ -1025,9 +978,17 @@ async def handle_username(
         )
         return
 
+    try:
+        save_user_to_sheet(username, chat_id)
+
+    except Exception as error:
+        print(
+            f"Не удалось сохранить пользователя "
+            f"{username} ({chat_id}): {error}"
+        )
+
     await update.message.reply_text(
-        "⏳ Проверяю неоплаченные позиции "
-        "по указанному юзернейму..."
+        "⏳ Проверяю позиции по указанному юзернейму..."
     )
 
     try:
@@ -1043,10 +1004,14 @@ async def handle_username(
 
     total_kzt = 0
     total_rub = 0
-    found_any = False
-    box_blocks = []
-    requisites_text = None
 
+    found_unpaid = False
+    found_paid = False
+
+    unpaid_box_blocks = []
+    paid_box_blocks = []
+
+    requisites_text = None
     safe_username = escape_md(username)
 
     for registry_row in registry_rows:
@@ -1094,7 +1059,9 @@ async def handle_username(
             )
             continue
 
-        box_lines = []
+        unpaid_lines = []
+        paid_lines = []
+
         box_kzt = 0
         box_rub = 0
 
@@ -1106,18 +1073,6 @@ async def handle_username(
 
             if table_username != username:
                 continue
-
-            payment_status = ""
-
-            if len(row) > 5:
-                payment_status = str(
-                    row[5]
-                ).strip().lower()
-
-            if payment_status == "оплачено":
-                continue
-
-            found_any = True
 
             number = escape_md(
                 row[0] if len(row) > 0 else ""
@@ -1135,24 +1090,39 @@ async def handle_username(
                 row[4] if len(row) > 4 else 0
             )
 
-            box_kzt += kzt
-            box_rub += rub
+            payment_status = str(
+                row[5] if len(row) > 5 else ""
+            ).strip().lower()
 
-            box_lines.append(
-                f"• {number} — {position_name}\n"
-                f"  {kzt} ₸ / {rub} ₽"
-            )
+            if payment_status == "оплачено":
+                found_paid = True
 
-        if box_lines:
+                paid_lines.append(
+                    f"• {number} — {position_name}\n"
+                    f"  ✅ ОПЛАЧЕНО"
+                )
+
+            else:
+                found_unpaid = True
+
+                box_kzt += kzt
+                box_rub += rub
+
+                unpaid_lines.append(
+                    f"• {number} — {position_name}\n"
+                    f"  {kzt} ₸ / {rub} ₽"
+                )
+
+        safe_box_name = escape_md(box_name)
+        safe_deadline = escape_md(deadline)
+
+        if unpaid_lines:
             total_kzt += box_kzt
             total_rub += box_rub
 
-            safe_box_name = escape_md(box_name)
-            safe_deadline = escape_md(deadline)
-
             block = (
                 f"📦 **{safe_box_name}**\n"
-                + "\n".join(box_lines)
+                + "\n".join(unpaid_lines)
             )
 
             if safe_deadline:
@@ -1160,45 +1130,77 @@ async def handle_username(
                     f"\n⏰ Дедлайн: {safe_deadline}"
                 )
 
-            box_blocks.append(block)
+            unpaid_box_blocks.append(block)
 
-    if not found_any:
+        if paid_lines:
+            paid_block = (
+                f"📦 **{safe_box_name}**\n"
+                + "\n".join(paid_lines)
+            )
+
+            paid_box_blocks.append(paid_block)
+
+    if not found_unpaid and not found_paid:
         await update.message.reply_text(
             f"По юзернейму {safe_username} "
-            "я ничего не нашла 🤍",
+            "я ничего не нашла в активных коробках 🤍",
             parse_mode="Markdown",
         )
         return
 
-    positions_text = (
-        f"👤 **{safe_username}**\n\n"
-        + "\n\n".join(box_blocks)
-    )
+    if found_unpaid:
+        unpaid_text = (
+            f"👤 **{safe_username}**\n\n"
+            "💳 **Неоплаченные позиции:**\n\n"
+            + "\n\n".join(unpaid_box_blocks)
+        )
 
-    for part in split_message(positions_text):
+        for part in split_message(unpaid_text):
+            await update.message.reply_text(
+                part,
+                parse_mode="Markdown",
+            )
+
+    else:
         await update.message.reply_text(
-            part,
+            f"👤 **{safe_username}**\n\n"
+            "✅ В активных коробках у вас нет "
+            "неоплаченных позиций.",
             parse_mode="Markdown",
         )
 
-    summary_text = ""
-
-    if requisites_text:
-        summary_text += (
-            "💳 **Реквизиты для оплаты:**\n"
-            f"{escape_md(requisites_text)}\n\n"
+    if found_paid:
+        paid_text = (
+            "✅ **Оплаченные разборы "
+            "в активных коробках:**\n\n"
+            + "\n\n".join(paid_box_blocks)
         )
 
-    summary_text += (
-        "━━━━━━━━━━━━\n"
-        "💰 **Итого к оплате:**\n"
-        f"**{total_kzt} ₸ / {total_rub} ₽**"
-    )
+        for part in split_message(paid_text):
+            await update.message.reply_text(
+                part,
+                parse_mode="Markdown",
+            )
 
-    await update.message.reply_text(
-        summary_text,
-        parse_mode="Markdown",
-    )
+    if found_unpaid:
+        summary_text = ""
+
+        if requisites_text:
+            summary_text += (
+                "💳 **Реквизиты для оплаты:**\n"
+                f"{escape_md(requisites_text)}\n\n"
+            )
+
+        summary_text += (
+            "━━━━━━━━━━━━\n"
+            "💰 **Итого к оплате:**\n"
+            f"**{total_kzt} ₸ / {total_rub} ₽**"
+        )
+
+        await update.message.reply_text(
+            summary_text,
+            parse_mode="Markdown",
+        )
 
 
 # ================== MAIN ==================
