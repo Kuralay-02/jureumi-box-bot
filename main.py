@@ -10,7 +10,7 @@ from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    ReplyKeyboardRemove,
+    ReplyKeyboardMarkup,
 )
 from telegram.ext import (
     ApplicationBuilder,
@@ -183,6 +183,34 @@ def parse_chat_id(value):
 
     except Exception:
         return None
+
+
+# ================== PERMANENT MENU ==================
+
+CALC_BUTTON = "📦 Посчитать мою сумму"
+NOTIFY_BUTTON = "📣 Разослать уведомление"
+PAYMENT_REMINDER_BUTTON = "🔔 Напомнить об оплате"
+
+
+def build_main_menu(chat_id: int):
+    """
+    Постоянная нижняя клавиатура.
+
+    Обычным пользователям доступен только подсчёт суммы.
+    Админские кнопки видны только ADMIN_CHAT_ID.
+    """
+
+    buttons = [[CALC_BUTTON]]
+
+    if chat_id == ADMIN_CHAT_ID:
+        buttons.append([NOTIFY_BUTTON])
+        buttons.append([PAYMENT_REMINDER_BUTTON])
+
+    return ReplyKeyboardMarkup(
+        buttons,
+        resize_keyboard=True,
+        is_persistent=True,
+    )
 
 
 # ================== ENV ==================
@@ -560,41 +588,14 @@ async def start(
     chat_id = update.effective_chat.id
     ensure_subscriber(chat_id)
 
-    buttons = [
-        [
-            InlineKeyboardButton(
-                "📦 Посчитать мою сумму",
-                callback_data="calc",
-            )
-        ]
-    ]
-
-    if chat_id == ADMIN_CHAT_ID:
-        buttons.append(
-            [
-                InlineKeyboardButton(
-                    "📣 Разослать уведомление",
-                    callback_data="notify",
-                )
-            ]
-        )
-
-        buttons.append(
-            [
-                InlineKeyboardButton(
-                    "🔔 Напомнить об оплате",
-                    callback_data="payment_reminder_preview",
-                )
-            ]
-        )
-
-    keyboard = InlineKeyboardMarkup(buttons)
-
     await update.message.reply_text(
-        "Здравствуйте!\n\n"
-        "Я помогу посчитать сумму к оплате.\n"
-        "Нажмите кнопку ниже 👇",
-        reply_markup=keyboard,
+        "Здравствуйте!
+
+"
+        "Я помогу посчитать сумму к оплате.
+"
+        "Выберите нужное действие в меню 👇",
+        reply_markup=build_main_menu(chat_id),
     )
 
 
@@ -616,7 +617,7 @@ async def on_button(
         await query.message.reply_text(
             "Пожалуйста, введите ваш Telegram-юзернейм\n"
             "(например: @anna)",
-            reply_markup=ReplyKeyboardRemove(),
+            reply_markup=build_main_menu(chat_id),
         )
 
     elif query.data == "notify":
@@ -964,6 +965,150 @@ async def handle_username(
 ):
     chat_id = update.effective_chat.id
     ensure_subscriber(chat_id)
+
+    message_text = (update.message.text or "").strip()
+
+    # Постоянная кнопка подсчёта суммы
+    if message_text == CALC_BUTTON:
+        context.user_data["waiting_username"] = True
+
+        await update.message.reply_text(
+            "Пожалуйста, введите ваш Telegram-юзернейм\n"
+            "(например: @anna)",
+            reply_markup=build_main_menu(chat_id),
+        )
+        return
+
+    # Постоянная админская кнопка рассылки новой коробки
+    if message_text == NOTIFY_BUTTON:
+        if chat_id != ADMIN_CHAT_ID:
+            return
+
+        try:
+            boxes = get_new_boxes_from_registry()
+
+        except Exception as error:
+            await update.message.reply_text(
+                "❌ Не удалось прочитать реестр коробок.\n\n"
+                f"Ошибка: {error}",
+                reply_markup=build_main_menu(chat_id),
+            )
+            return
+
+        if not boxes:
+            await update.message.reply_text(
+                "❌ Нет новых коробок для уведомления",
+                reply_markup=build_main_menu(chat_id),
+            )
+            return
+
+        context.user_data["notify_boxes"] = boxes
+
+        keyboard = []
+
+        for index, box in enumerate(boxes):
+            keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        f"📦 {box['name']}",
+                        callback_data=f"notify_box_{index}",
+                    )
+                ]
+            )
+
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    "❌ Отмена",
+                    callback_data="cancel",
+                )
+            ]
+        )
+
+        await update.message.reply_text(
+            "Выберите коробку для отправки уведомления:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    # Постоянная админская кнопка ручного напоминания об оплате
+    if message_text == PAYMENT_REMINDER_BUTTON:
+        if chat_id != ADMIN_CHAT_ID:
+            return
+
+        await update.message.reply_text(
+            "⏳ Проверяю неоплаченные позиции "
+            "во всех активных коробках...",
+            reply_markup=build_main_menu(chat_id),
+        )
+
+        try:
+            unpaid_users = collect_unpaid_positions()
+            users_map = get_users_map()
+
+        except gspread.WorksheetNotFound:
+            await update.message.reply_text(
+                "❌ Не найден лист «Пользователи».\n\n"
+                "Проверь, что второй лист называется точно:\n"
+                "Пользователи",
+                reply_markup=build_main_menu(chat_id),
+            )
+            return
+
+        except Exception as error:
+            await update.message.reply_text(
+                "❌ Не удалось выполнить проверку.\n\n"
+                f"Ошибка: {error}",
+                reply_markup=build_main_menu(chat_id),
+            )
+            return
+
+        if not unpaid_users:
+            await update.message.reply_text(
+                "✅ Во всех активных коробках "
+                "стоит отметка «ОПЛАЧЕНО».\n"
+                "Напоминать некому.",
+                reply_markup=build_main_menu(chat_id),
+            )
+            return
+
+        preview_text = build_payment_preview(
+            unpaid_users,
+            users_map,
+        )
+
+        confirm_keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "✅ Отправить напоминания",
+                        callback_data="payment_reminder_send",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "❌ Отмена",
+                        callback_data="cancel",
+                    )
+                ],
+            ]
+        )
+
+        preview_parts = split_message(preview_text)
+
+        for index, part in enumerate(preview_parts):
+            is_last_part = index == len(preview_parts) - 1
+
+            await update.message.reply_text(
+                part,
+                parse_mode="Markdown",
+                reply_markup=(
+                    confirm_keyboard
+                    if is_last_part
+                    else build_main_menu(chat_id)
+                ),
+            )
+        return
 
     if not context.user_data.get("waiting_username"):
         return
