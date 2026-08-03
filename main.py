@@ -2,7 +2,6 @@ import os
 import json
 import re
 import unicodedata
-from datetime import datetime, timedelta
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -22,210 +21,317 @@ from telegram.ext import (
     filters,
 )
 
-import pytz
 
-# ================== SUBSCRIBERS (PERSIST) ==================
+# ================== SUBSCRIBERS ==================
 
 SUBSCRIBERS_FILE = "subscribers.json"
 SUBSCRIBERS = set()
 
+
 def load_subscribers():
     global SUBSCRIBERS
+
     try:
-        with open(SUBSCRIBERS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        with open(SUBSCRIBERS_FILE, "r", encoding="utf-8") as file:
+            data = json.load(file)
+
         if isinstance(data, list):
-            SUBSCRIBERS = set(int(x) for x in data if str(x).strip().isdigit())
+            SUBSCRIBERS = {
+                int(value)
+                for value in data
+                if str(value).strip().isdigit()
+            }
         else:
             SUBSCRIBERS = set()
+
     except FileNotFoundError:
         SUBSCRIBERS = set()
-    except Exception:
-        # если файл битый/пустой — просто стартуем с пустого списка
+
+    except Exception as error:
+        print(f"Не удалось загрузить subscribers.json: {error}")
         SUBSCRIBERS = set()
+
 
 def save_subscribers():
     try:
-        with open(SUBSCRIBERS_FILE, "w", encoding="utf-8") as f:
-            json.dump(sorted(list(SUBSCRIBERS)), f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"Не удалось сохранить subscribers: {e}")
+        with open(SUBSCRIBERS_FILE, "w", encoding="utf-8") as file:
+            json.dump(
+                sorted(SUBSCRIBERS),
+                file,
+                ensure_ascii=False,
+                indent=2,
+            )
+
+    except Exception as error:
+        print(f"Не удалось сохранить subscribers.json: {error}")
+
 
 def ensure_subscriber(chat_id: int):
-    """Добавляет chat_id в подписчики и сохраняет на диск."""
     if not chat_id:
         return
+
     if chat_id not in SUBSCRIBERS:
         SUBSCRIBERS.add(chat_id)
         save_subscribers()
 
+
 # ================== HELPERS ==================
 
-# Более “строгий” поиск username внутри любой строки (t.me/..., "@user_name оплата", скобки и т.п.)
 USERNAME_RE = re.compile(
     r"(?i)(?:^|[^a-z0-9_@])(@?[a-z0-9_]{5,32})(?:$|[^a-z0-9_])"
 )
 
-def normalize_username(u):
+
+def normalize_username(value):
     """
-    Нормализует username:
-    - убирает невидимые символы/нестандартные пробелы
-    - понимает t.me/username, https://t.me/username
-    - вытаскивает username из строк типа '@user__name оплата'
-    - возвращает '@username' в lower
+    Все варианты:
+
+    @tepl0o0
+    tepl0o0
+    Tepl0o0
+    @Tepl0o0
+
+    преобразуются в:
+
+    @tepl0o0
     """
-    if not u:
+
+    if not value:
         return ""
 
-    s = unicodedata.normalize("NFKC", str(u))
-    s = s.replace("\u00A0", " ")   # NBSP
-    s = s.replace("\u200b", "")    # zero-width space
-    s = s.replace("\ufeff", "")    # BOM
-    s = s.strip()
+    text = unicodedata.normalize("NFKC", str(value))
+    text = text.replace("\u00A0", " ")
+    text = text.replace("\u200b", "")
+    text = text.replace("\ufeff", "")
+    text = text.strip()
 
-    s = s.replace("https://t.me/", "").replace("http://t.me/", "").replace("t.me/", "")
+    text = (
+        text
+        .replace("https://t.me/", "")
+        .replace("http://t.me/", "")
+        .replace("t.me/", "")
+    )
 
-    m = USERNAME_RE.search(s)
-    if not m:
+    match = USERNAME_RE.search(text)
+
+    if not match:
         return ""
 
-    s = m.group(1).lower()
-    if not s.startswith("@"):
-        s = "@" + s
-    return s
+    username = match.group(1).lower()
+
+    if not username.startswith("@"):
+        username = "@" + username
+
+    return username
+
 
 def escape_md(text: str) -> str:
-    """Экранирует спецсимволы Telegram Markdown (legacy), чтобы не ломался парсинг."""
+    """
+    Экранирование для обычного Telegram Markdown.
+    """
+
     if text is None:
         return ""
-    s = str(text)
-    s = s.replace("\\", "\\\\")
-    s = s.replace("*", "\\*")
-    s = s.replace("_", "\\_")
-    s = s.replace("[", "\\[")
-    s = s.replace("`", "\\`")
-    return s
+
+    value = str(text)
+    value = value.replace("\\", "\\\\")
+    value = value.replace("*", "\\*")
+    value = value.replace("_", "\\_")
+    value = value.replace("[", "\\[")
+    value = value.replace("`", "\\`")
+
+    return value
+
 
 def split_message(text: str, limit: int = 4000) -> list[str]:
-    """Режет длинный текст на части для Telegram (лимит ~4096), стараясь резать по переносам."""
+    """
+    Делит длинное сообщение на части.
+    """
+
     parts = []
-    text = text or ""
-    while len(text) > limit:
-        chunk = text[:limit]
-        cut = chunk.rfind("\n")
-        if cut <= 0:
-            cut = limit
-        parts.append(text[:cut])
-        text = text[cut:].lstrip("\n")
-    if text:
-        parts.append(text)
+    remaining = text or ""
+
+    while len(remaining) > limit:
+        chunk = remaining[:limit]
+        cut_position = chunk.rfind("\n")
+
+        if cut_position <= 0:
+            cut_position = limit
+
+        parts.append(remaining[:cut_position])
+        remaining = remaining[cut_position:].lstrip("\n")
+
+    if remaining:
+        parts.append(remaining)
+
     return parts
 
-def parse_int(x) -> int:
-    """Мягко парсим суммы (на случай '1 000', '1000.0', пусто)."""
-    s = str(x).strip().replace(" ", "")
-    if not s:
+
+def parse_int(value) -> int:
+    """
+    Преобразует:
+
+    1000
+    1 000
+    1000.0
+
+    в целое число.
+    """
+
+    text = str(value).strip().replace(" ", "")
+
+    if not text:
         return 0
+
     try:
-        return int(float(s))
+        return int(float(text))
+
     except Exception:
         return 0
 
+
+def parse_chat_id(value):
+    """
+    Безопасно преобразует Chat ID из Google Таблицы.
+    """
+
+    text = str(value).strip().replace(" ", "")
+
+    if not text:
+        return None
+
+    try:
+        return int(float(text))
+
+    except Exception:
+        return None
+
+
 # ================== ENV ==================
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 REGISTRY_SHEET_URL = os.getenv("REGISTRY_SHEET_URL")
 GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
+
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID"))
 
+
 # ================== GOOGLE ==================
+
 creds_dict = json.loads(GOOGLE_CREDS_JSON)
-scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
-creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+
+scopes = [
+    "https://www.googleapis.com/auth/spreadsheets.readonly"
+]
+
+creds = Credentials.from_service_account_info(
+    creds_dict,
+    scopes=scopes,
+)
+
 gc = gspread.authorize(creds)
 
+
+def get_registry_spreadsheet():
+    return gc.open_by_url(REGISTRY_SHEET_URL)
+
+
+def get_registry_sheet():
+    """
+    Первый лист — реестр коробок.
+    Его название может оставаться «Лист1».
+    """
+
+    return get_registry_spreadsheet().sheet1
+
+
+def get_users_sheet():
+    """
+    Второй лист должен называться:
+
+    Пользователи
+
+    Заголовки:
+    Username | Chat ID
+    """
+
+    return get_registry_spreadsheet().worksheet("Пользователи")
+
+
+def get_users_map():
+    """
+    Возвращает словарь:
+
+    {
+        "@tepl0o0": 123456789,
+        "@anna": 987654321
+    }
+    """
+
+    users_sheet = get_users_sheet()
+    rows = users_sheet.get_all_records()
+
+    users_map = {}
+
+    for row in rows:
+        username = normalize_username(row.get("Username", ""))
+        chat_id = parse_chat_id(row.get("Chat ID", ""))
+
+        if not username or not chat_id:
+            continue
+
+        users_map[username] = chat_id
+
+    return users_map
+
+
+# ================== NEW BOXES ==================
+
 def get_new_boxes_from_registry():
-    sheet = gc.open_by_url(REGISTRY_SHEET_URL).sheet1
-    rows = sheet.get_all_records()
+    registry_sheet = get_registry_sheet()
+    rows = registry_sheet.get_all_records()
 
     new_boxes = []
 
     for row in rows:
-        if str(row.get("Активна", "")).strip().lower() != "да":
+        is_active = str(
+            row.get("Активна", "")
+        ).strip().lower()
+
+        notification_sent = str(
+            row.get("Уведомление отправлено", "")
+        ).strip().lower()
+
+        if is_active != "да":
             continue
 
-        if str(row.get("Уведомление отправлено", "")).strip().lower() == "да":
+        if notification_sent == "да":
             continue
 
-        new_boxes.append({
-            "name": row.get("Название коробки"),
-            "link": row.get("Ссылка на таблицу"),
-            "deadline": row.get("Дедлайн оплаты"),
-        })
+        new_boxes.append(
+            {
+                "name": row.get("Название коробки"),
+                "link": row.get("Ссылка на таблицу"),
+                "deadline": row.get("Дедлайн оплаты"),
+            }
+        )
 
     return new_boxes
 
-# ================== DEADLINES / REMINDERS ==================
-MSK_TZ = pytz.timezone("Europe/Moscow")
-
-def parse_deadline_msk(deadline_text: str) -> datetime | None:
-    """
-    Из строки вида:
-    '23:00 по ACT / 21:00 по МСК 01.02.2026'
-    извлекает дедлайн как datetime в МСК
-    """
-    if not deadline_text:
-        return None
-
-    time_match = re.search(r"(\d{1,2}:\d{2})\s*по\s*МСК", deadline_text)
-    date_match = re.search(r"(\d{2}\.\d{2}\.\d{4})", deadline_text)
-
-    if not time_match or not date_match:
-        return None
-
-    time_part = time_match.group(1)   # 21:00
-    date_part = date_match.group(1)   # 01.02.2026
-
-    dt_str = f"{date_part} {time_part}"
-    naive_dt = datetime.strptime(dt_str, "%d.%m.%Y %H:%M")
-    return MSK_TZ.localize(naive_dt)
-
-def should_send_24h_reminder(deadline_dt: datetime) -> bool:
-    now_msk = datetime.now(MSK_TZ)
-    return timedelta(hours=0) <= (deadline_dt - now_msk) <= timedelta(hours=24)
-
-def get_boxes_for_24h_reminder():
-    sheet = gc.open_by_url(REGISTRY_SHEET_URL).sheet1
-    rows = sheet.get_all_records()
-
-    boxes = []
-
-    for row in rows:
-        if str(row.get("Активна", "")).strip().lower() != "да":
-            continue
-
-        if str(row.get("Напоминание за 24ч отправлено", "")).strip().lower() == "да":
-            continue
-
-        deadline_text = row.get("Дедлайн оплаты", "")
-        deadline_dt = parse_deadline_msk(deadline_text)
-
-        if not deadline_dt:
-            continue
-
-        if should_send_24h_reminder(deadline_dt):
-            boxes.append({
-                "name": row.get("Название коробки"),
-                "link": row.get("Ссылка на таблицу"),
-                "deadline": deadline_text,
-            })
-
-    return boxes
 
 def build_box_notification_keyboard():
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("📦 Посчитать сумму", callback_data="calc")]]
+        [
+            [
+                InlineKeyboardButton(
+                    "📦 Посчитать сумму",
+                    callback_data="calc",
+                )
+            ]
+        ]
     )
+
 
 def build_box_notification_text(box):
     name = box["name"]
@@ -240,79 +346,392 @@ def build_box_notification_text(box):
         "👉 Нажми кнопку ниже, чтобы посчитать сумму"
     )
 
+
+# ================== UNPAID POSITIONS ==================
+
+def collect_unpaid_positions():
+    """
+    Проверяет все активные коробки.
+
+    Возвращает данные в формате:
+
+    {
+        "@username": {
+            "boxes": [
+                {
+                    "name": "...",
+                    "deadline": "...",
+                    "positions": [...],
+                    "total_kzt": 1000,
+                    "total_rub": 200
+                }
+            ],
+            "total_kzt": 1000,
+            "total_rub": 200,
+            "positions_count": 1
+        }
+    }
+    """
+
+    registry_sheet = get_registry_sheet()
+    registry_rows = registry_sheet.get_all_records()
+
+    unpaid_users = {}
+
+    for registry_row in registry_rows:
+        is_active = str(
+            registry_row.get("Активна", "")
+        ).strip().lower()
+
+        if is_active != "да":
+            continue
+
+        box_name = registry_row.get("Название коробки", "")
+        sheet_url = registry_row.get("Ссылка на таблицу", "")
+        deadline = registry_row.get("Дедлайн оплаты", "")
+
+        if not sheet_url:
+            continue
+
+        try:
+            box_sheet = gc.open_by_url(sheet_url).sheet1
+            rows = box_sheet.get_all_values()[1:]
+
+        except Exception as error:
+            print(
+                f"Не удалось открыть коробку "
+                f"{box_name}: {error}"
+            )
+            continue
+
+        box_users = {}
+
+        for row in rows:
+            if len(row) < 3:
+                continue
+
+            username = normalize_username(row[2])
+
+            if not username:
+                continue
+
+            payment_status = ""
+
+            if len(row) > 5:
+                payment_status = str(
+                    row[5]
+                ).strip().lower()
+
+            if payment_status == "оплачено":
+                continue
+
+            number = row[0] if len(row) > 0 else ""
+            position_name = row[1] if len(row) > 1 else ""
+            kzt = parse_int(row[3]) if len(row) > 3 else 0
+            rub = parse_int(row[4]) if len(row) > 4 else 0
+
+            if username not in box_users:
+                box_users[username] = {
+                    "positions": [],
+                    "total_kzt": 0,
+                    "total_rub": 0,
+                }
+
+            box_users[username]["positions"].append(
+                {
+                    "number": number,
+                    "name": position_name,
+                    "kzt": kzt,
+                    "rub": rub,
+                }
+            )
+
+            box_users[username]["total_kzt"] += kzt
+            box_users[username]["total_rub"] += rub
+
+        for username, box_data in box_users.items():
+            if username not in unpaid_users:
+                unpaid_users[username] = {
+                    "boxes": [],
+                    "total_kzt": 0,
+                    "total_rub": 0,
+                    "positions_count": 0,
+                }
+
+            unpaid_users[username]["boxes"].append(
+                {
+                    "name": box_name,
+                    "deadline": deadline,
+                    "positions": box_data["positions"],
+                    "total_kzt": box_data["total_kzt"],
+                    "total_rub": box_data["total_rub"],
+                }
+            )
+
+            unpaid_users[username]["total_kzt"] += (
+                box_data["total_kzt"]
+            )
+
+            unpaid_users[username]["total_rub"] += (
+                box_data["total_rub"]
+            )
+
+            unpaid_users[username]["positions_count"] += len(
+                box_data["positions"]
+            )
+
+    return unpaid_users
+
+
+def build_payment_reminder_text(username, user_data):
+    """
+    Создаёт персональное сообщение для пользователя.
+    """
+
+    safe_username = escape_md(username)
+
+    text = (
+        "🔔 **Напоминание об оплате**\n\n"
+        f"По юзернейму **{safe_username}** "
+        "остались неоплаченные позиции:\n\n"
+    )
+
+    box_blocks = []
+
+    for box in user_data["boxes"]:
+        safe_box_name = escape_md(box["name"])
+        safe_deadline = escape_md(box["deadline"])
+
+        block = f"📦 **{safe_box_name}**\n"
+
+        position_lines = []
+
+        for position in box["positions"]:
+            safe_number = escape_md(position["number"])
+            safe_name = escape_md(position["name"])
+
+            position_lines.append(
+                f"• {safe_number} — {safe_name}\n"
+                f"  {position['kzt']} ₸ / "
+                f"{position['rub']} ₽"
+            )
+
+        block += "\n".join(position_lines)
+
+        if safe_deadline:
+            block += f"\n⏰ Дедлайн: {safe_deadline}"
+
+        box_blocks.append(block)
+
+    text += "\n\n".join(box_blocks)
+
+    text += (
+        "\n\n━━━━━━━━━━━━\n"
+        "💰 **Итого к оплате:**\n"
+        f"**{user_data['total_kzt']} ₸ / "
+        f"{user_data['total_rub']} ₽**\n\n"
+        "Пожалуйста, оплатите позиции и отправьте чек "
+        "по правилам шопа."
+    )
+
+    return text
+
+
+def build_payment_preview(unpaid_users, users_map):
+    """
+    Формирует предпросмотр для администратора.
+    """
+
+    with_chat_id = []
+    without_chat_id = []
+
+    for username, user_data in sorted(unpaid_users.items()):
+        preview_line = (
+            f"• {escape_md(username)} — "
+            f"{user_data['positions_count']} поз. — "
+            f"{user_data['total_kzt']} ₸ / "
+            f"{user_data['total_rub']} ₽"
+        )
+
+        if username in users_map:
+            with_chat_id.append(preview_line)
+        else:
+            without_chat_id.append(preview_line)
+
+    text = (
+        "🔔 **Предпросмотр напоминания об оплате**\n\n"
+        f"👥 Всего пользователей с неоплаченными "
+        f"позициями: **{len(unpaid_users)}**\n"
+        f"✅ Найдены в листе «Пользователи»: "
+        f"**{len(with_chat_id)}**\n"
+        f"❌ Нет Chat ID: "
+        f"**{len(without_chat_id)}**\n\n"
+    )
+
+    if with_chat_id:
+        text += (
+            "✅ **Получатели:**\n"
+            + "\n".join(with_chat_id)
+            + "\n\n"
+        )
+
+    if without_chat_id:
+        text += (
+            "❌ **Нет в базе пользователей:**\n"
+            + "\n".join(without_chat_id)
+        )
+
+    return text
+
+
 # ================== START ==================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
     chat_id = update.effective_chat.id
     ensure_subscriber(chat_id)
 
     buttons = [
-        [InlineKeyboardButton("📦 Посчитать мою сумму", callback_data="calc")]
+        [
+            InlineKeyboardButton(
+                "📦 Посчитать мою сумму",
+                callback_data="calc",
+            )
+        ]
     ]
 
     if chat_id == ADMIN_CHAT_ID:
-        buttons.append([InlineKeyboardButton("📣 Разослать уведомление", callback_data="notify")])
-        buttons.append([InlineKeyboardButton("🔔 Напомнить за 24 часа", callback_data="remind_24h_preview")])
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    "📣 Разослать уведомление",
+                    callback_data="notify",
+                )
+            ]
+        )
+
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    "🔔 Напомнить об оплате",
+                    callback_data="payment_reminder_preview",
+                )
+            ]
+        )
 
     keyboard = InlineKeyboardMarkup(buttons)
 
     await update.message.reply_text(
-        "Здравствуйте!\n\nЯ помогу посчитать сумму к оплате.\nНажмите кнопку ниже 👇",
-        reply_markup=keyboard
+        "Здравствуйте!\n\n"
+        "Я помогу посчитать сумму к оплате.\n"
+        "Нажмите кнопку ниже 👇",
+        reply_markup=keyboard,
     )
 
-# ================== BUTTON ==================
-async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+# ================== BUTTONS ==================
+
+async def on_button(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
     query = update.callback_query
     await query.answer()
 
     chat_id = update.effective_chat.id
-    ensure_subscriber(chat_id)  # ✅ подписываем даже если человек пришёл по кнопке/пересланному сообщению
+    ensure_subscriber(chat_id)
+
+    # ================== CALCULATE ==================
 
     if query.data == "calc":
         context.user_data["waiting_username"] = True
+
         await query.message.reply_text(
-            "Пожалуйста, введите ваш Telegram-юзернейм\n(например: @anna)",
-            reply_markup=ReplyKeyboardRemove()
+            "Пожалуйста, введите ваш Telegram-юзернейм\n"
+            "(например: @anna)",
+            reply_markup=ReplyKeyboardRemove(),
         )
 
-    # ====== ADMIN: choose which box to notify ======
+    # ================== NEW BOX NOTIFICATION ==================
+
     elif query.data == "notify":
         if chat_id != ADMIN_CHAT_ID:
-            await query.answer("Недостаточно прав", show_alert=True)
+            await query.message.reply_text(
+                "❌ Недостаточно прав"
+            )
             return
 
-        boxes = get_new_boxes_from_registry()
+        try:
+            boxes = get_new_boxes_from_registry()
+
+        except Exception as error:
+            await query.message.reply_text(
+                "❌ Не удалось прочитать реестр коробок.\n\n"
+                f"Ошибка: {error}"
+            )
+            return
 
         if not boxes:
-            await query.message.reply_text("❌ Нет новых коробок для уведомления")
+            await query.message.reply_text(
+                "❌ Нет новых коробок для уведомления"
+            )
             return
 
         context.user_data["notify_boxes"] = boxes
 
         keyboard = []
-        for i, box in enumerate(boxes):
-            keyboard.append([InlineKeyboardButton(f"📦 {box['name']}", callback_data=f"notify_box_{i}")])
-        keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
+
+        for index, box in enumerate(boxes):
+            keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        f"📦 {box['name']}",
+                        callback_data=f"notify_box_{index}",
+                    )
+                ]
+            )
+
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    "❌ Отмена",
+                    callback_data="cancel",
+                )
+            ]
+        )
 
         await query.message.reply_text(
             "Выберите коробку для отправки уведомления:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            reply_markup=InlineKeyboardMarkup(keyboard),
         )
 
     elif query.data.startswith("notify_box_"):
         if chat_id != ADMIN_CHAT_ID:
-            await query.answer("Недостаточно прав", show_alert=True)
+            await query.message.reply_text(
+                "❌ Недостаточно прав"
+            )
             return
 
-        boxes = context.user_data.get("notify_boxes", [])
+        boxes = context.user_data.get(
+            "notify_boxes",
+            [],
+        )
+
         try:
             index = int(query.data.split("_")[-1])
+
         except Exception:
-            await query.message.reply_text("Ошибка выбора коробки")
+            await query.message.reply_text(
+                "❌ Ошибка выбора коробки"
+            )
             return
 
         if index < 0 or index >= len(boxes):
-            await query.message.reply_text("Ошибка выбора коробки")
+            await query.message.reply_text(
+                "❌ Ошибка выбора коробки"
+            )
             return
 
         box = boxes[index]
@@ -320,99 +739,277 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = build_box_notification_keyboard()
 
         sent = 0
-        for sub_id in list(SUBSCRIBERS):
+        failed = 0
+
+        await query.message.reply_text(
+            "⏳ Начинаю рассылку уведомления..."
+        )
+
+        for subscriber_id in list(SUBSCRIBERS):
             try:
                 await context.bot.send_message(
-                    chat_id=sub_id,
+                    chat_id=subscriber_id,
                     text=text,
                     reply_markup=keyboard,
                     parse_mode="Markdown",
-                    disable_web_page_preview=True
+                    disable_web_page_preview=True,
                 )
+
                 sent += 1
-            except Exception as e:
-                print(f"Не удалось отправить {sub_id}: {e}")
+
+            except Exception as error:
+                failed += 1
+
+                print(
+                    f"Не удалось отправить "
+                    f"{subscriber_id}: {error}"
+                )
 
         await query.message.reply_text(
-            f"✅ Уведомление отправлено\n📦 {box['name']}\n👥 Получателей: {sent}"
+            "✅ Уведомление отправлено\n\n"
+            f"📦 {box['name']}\n"
+            f"✅ Доставлено: {sent}\n"
+            f"❌ Не доставлено: {failed}"
         )
 
-    # ====== ADMIN: 24h reminder preview/send (как у тебя было) ======
-    elif query.data == "remind_24h_preview":
+    # ================== PAYMENT REMINDER PREVIEW ==================
+
+    elif query.data == "payment_reminder_preview":
         if chat_id != ADMIN_CHAT_ID:
-            await query.answer("Недостаточно прав", show_alert=True)
+            await query.message.reply_text(
+                "❌ Недостаточно прав"
+            )
             return
 
-        boxes = get_boxes_for_24h_reminder()
+        await query.message.reply_text(
+            "⏳ Проверяю неоплаченные позиции "
+            "во всех активных коробках..."
+        )
 
-        if not boxes:
-            await query.message.reply_text("⏰ Нет коробок для напоминания за 24 часа")
+        try:
+            unpaid_users = collect_unpaid_positions()
+            users_map = get_users_map()
+
+        except gspread.WorksheetNotFound:
+            await query.message.reply_text(
+                "❌ Не найден лист «Пользователи».\n\n"
+                "Проверь, что второй лист называется точно:\n"
+                "Пользователи"
+            )
             return
 
-        text = "🔔 **Напоминание за 24 часа — предпросмотр**\n\n"
-        for box in boxes:
-            text += (
-                f"• **[{box['name']}]({box['link']})**\n"
-                f"⏰ Дедлайн: {box['deadline']}\n\n"
+        except Exception as error:
+            await query.message.reply_text(
+                "❌ Не удалось выполнить проверку.\n\n"
+                f"Ошибка: {error}"
+            )
+            return
+
+        if not unpaid_users:
+            await query.message.reply_text(
+                "✅ Во всех активных коробках "
+                "стоит отметка «ОПЛАЧЕНО».\n"
+                "Напоминать некому."
+            )
+            return
+
+        context.user_data["payment_reminder_data"] = (
+            unpaid_users
+        )
+
+        preview_text = build_payment_preview(
+            unpaid_users,
+            users_map,
+        )
+
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "✅ Отправить напоминания",
+                        callback_data="payment_reminder_send",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "❌ Отмена",
+                        callback_data="cancel",
+                    )
+                ],
+            ]
+        )
+
+        preview_parts = split_message(preview_text)
+
+        for index, part in enumerate(preview_parts):
+            is_last_part = index == len(preview_parts) - 1
+
+            await query.message.reply_text(
+                part,
+                parse_mode="Markdown",
+                reply_markup=(
+                    keyboard
+                    if is_last_part
+                    else None
+                ),
             )
 
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Отправить напоминание", callback_data="remind_24h_send")],
-            [InlineKeyboardButton("❌ Отмена", callback_data="cancel")]
-        ])
+    # ================== PAYMENT REMINDER SEND ==================
+
+    elif query.data == "payment_reminder_send":
+        if chat_id != ADMIN_CHAT_ID:
+            await query.message.reply_text(
+                "❌ Недостаточно прав"
+            )
+            return
 
         await query.message.reply_text(
-            text,
-            parse_mode="Markdown",
-            disable_web_page_preview=True,
-            reply_markup=keyboard
+            "⏳ Повторно проверяю актуальные оплаты "
+            "и начинаю рассылку..."
         )
+
+        try:
+            unpaid_users = collect_unpaid_positions()
+            users_map = get_users_map()
+
+        except Exception as error:
+            await query.message.reply_text(
+                "❌ Не удалось выполнить рассылку.\n\n"
+                f"Ошибка: {error}"
+            )
+            return
+
+        if not unpaid_users:
+            await query.message.reply_text(
+                "✅ Неоплаченных позиций больше нет."
+            )
+            return
+
+        sent_users = []
+        missing_users = []
+        failed_users = []
+
+        keyboard = build_box_notification_keyboard()
+
+        for username, user_data in sorted(
+            unpaid_users.items()
+        ):
+            target_chat_id = users_map.get(username)
+
+            if not target_chat_id:
+                missing_users.append(username)
+                continue
+
+            reminder_text = build_payment_reminder_text(
+                username,
+                user_data,
+            )
+
+            reminder_parts = split_message(reminder_text)
+
+            try:
+                for index, part in enumerate(reminder_parts):
+                    is_last_part = (
+                        index == len(reminder_parts) - 1
+                    )
+
+                    await context.bot.send_message(
+                        chat_id=target_chat_id,
+                        text=part,
+                        parse_mode="Markdown",
+                        reply_markup=(
+                            keyboard
+                            if is_last_part
+                            else None
+                        ),
+                        disable_web_page_preview=True,
+                    )
+
+                sent_users.append(username)
+
+            except Exception as error:
+                error_text = str(error).strip()
+
+                if not error_text:
+                    error_text = error.__class__.__name__
+
+                failed_users.append(
+                    {
+                        "username": username,
+                        "reason": error_text,
+                    }
+                )
+
+                print(
+                    f"Не удалось отправить напоминание "
+                    f"{username} ({target_chat_id}): {error}"
+                )
+
+        report_text = (
+            "📋 **Отчёт о рассылке напоминаний**\n\n"
+            f"✅ Доставлено: **{len(sent_users)}**\n"
+            f"❌ Нет Chat ID: **{len(missing_users)}**\n"
+            f"⚠️ Ошибка отправки: "
+            f"**{len(failed_users)}**"
+        )
+
+        if sent_users:
+            report_text += (
+                "\n\n✅ **Доставлено:**\n"
+                + "\n".join(
+                    f"• {escape_md(username)}"
+                    for username in sent_users
+                )
+            )
+
+        if missing_users:
+            report_text += (
+                "\n\n❌ **Нет в листе «Пользователи»:**\n"
+                + "\n".join(
+                    f"• {escape_md(username)}"
+                    for username in missing_users
+                )
+            )
+
+        if failed_users:
+            report_text += (
+                "\n\n⚠️ **Не удалось отправить:**\n"
+            )
+
+            for failed_user in failed_users:
+                safe_username = escape_md(
+                    failed_user["username"]
+                )
+
+                safe_reason = escape_md(
+                    failed_user["reason"]
+                )
+
+                report_text += (
+                    f"• {safe_username} — "
+                    f"{safe_reason}\n"
+                )
+
+        for part in split_message(report_text):
+            await query.message.reply_text(
+                part,
+                parse_mode="Markdown",
+            )
+
+    # ================== CANCEL ==================
 
     elif query.data == "cancel":
-        await query.message.reply_text("❌ Действие отменено")
+        await query.message.reply_text(
+            "❌ Действие отменено"
+        )
 
-    elif query.data == "remind_24h_send":
-        if chat_id != ADMIN_CHAT_ID:
-            await query.answer("Недостаточно прав", show_alert=True)
-            return
 
-        boxes = get_boxes_for_24h_reminder()
+# ================== USERNAME SEARCH ==================
 
-        if not boxes:
-            await query.message.reply_text("⏰ Нет коробок для напоминания за 24 часа")
-            return
-
-        sent_boxes = 0
-
-        for box in boxes:
-            text = (
-                "⏰ **Напоминание! Осталось 24 часа до дедлайна**\n\n"
-                f"📦 **[{box['name']}]({box['link']})**\n"
-                f"🕒 Дедлайн: {box['deadline']}\n\n"
-                "👉 Проверь себя по юзернейму и не забудь оплатить"
-            )
-
-            keyboard = build_box_notification_keyboard()
-
-            for sub_id in list(SUBSCRIBERS):
-                try:
-                    await context.bot.send_message(
-                        chat_id=sub_id,
-                        text=text,
-                        reply_markup=keyboard,
-                        parse_mode="Markdown",
-                        disable_web_page_preview=True
-                    )
-                except Exception as e:
-                    print(f"Не удалось отправить {sub_id}: {e}")
-
-            sent_boxes += 1
-
-        await query.message.reply_text(f"✅ Напоминания отправлены\n📦 Коробок: {sent_boxes}")
-
-# ================== USERNAME ==================
-async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # ✅ даже если человек не нажимал /start, но пишет юзер — мы сохраняем его chat_id
+async def handle_username(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
     ensure_subscriber(update.effective_chat.id)
 
     if not context.user_data.get("waiting_username"):
@@ -422,68 +1019,129 @@ async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["waiting_username"] = False
 
     if not username:
-        await update.message.reply_text("Не смогла распознать юзернейм. Пришли, пожалуйста, в формате @username")
+        await update.message.reply_text(
+            "Не смогла распознать юзернейм.\n"
+            "Пришли, пожалуйста, в формате @username"
+        )
         return
 
-    registry = gc.open_by_url(REGISTRY_SHEET_URL).sheet1
-    registry_rows = registry.get_all_records()
+    await update.message.reply_text(
+        "⏳ Проверяю неоплаченные позиции "
+        "по указанному юзернейму..."
+    )
+
+    try:
+        registry = get_registry_sheet()
+        registry_rows = registry.get_all_records()
+
+    except Exception as error:
+        await update.message.reply_text(
+            "❌ Не удалось открыть реестр коробок.\n\n"
+            f"Ошибка: {error}"
+        )
+        return
 
     total_kzt = 0
     total_rub = 0
     found_any = False
     box_blocks = []
-
     requisites_text = None
 
     safe_username = escape_md(username)
 
-    for reg in registry_rows:
-        if str(reg.get("Активна", "")).lower() != "да":
+    for registry_row in registry_rows:
+        is_active = str(
+            registry_row.get("Активна", "")
+        ).strip().lower()
+
+        if is_active != "да":
             continue
 
-        box_name = reg.get("Название коробки")
-        sheet_url = reg.get("Ссылка на таблицу")
-        deadline = reg.get("Дедлайн оплаты")
-        requisites = reg.get("Реквизиты для оплаты")
+        box_name = registry_row.get(
+            "Название коробки",
+            "",
+        )
+
+        sheet_url = registry_row.get(
+            "Ссылка на таблицу",
+            "",
+        )
+
+        deadline = registry_row.get(
+            "Дедлайн оплаты",
+            "",
+        )
+
+        requisites = registry_row.get(
+            "Реквизиты для оплаты",
+            "",
+        )
 
         if requisites and not requisites_text:
             requisites_text = requisites
 
+        if not sheet_url:
+            continue
+
         try:
             sheet = gc.open_by_url(sheet_url).sheet1
             rows = sheet.get_all_values()[1:]
-        except Exception:
+
+        except Exception as error:
+            print(
+                f"Не удалось открыть коробку "
+                f"{box_name}: {error}"
+            )
             continue
 
         box_lines = []
         box_kzt = 0
         box_rub = 0
 
-        user_nick = username  # уже нормализован
-
-        for r in rows:
-            if len(r) < 5:
+        for row in rows:
+            if len(row) < 3:
                 continue
 
-            tg_nick = normalize_username(r[2])
-            if tg_nick != user_nick:
+            table_username = normalize_username(row[2])
+
+            if table_username != username:
                 continue
 
-            payment_status = str(r[5]).strip().lower() if len(r) > 5 else ""
+            payment_status = ""
+
+            if len(row) > 5:
+                payment_status = str(
+                    row[5]
+                ).strip().lower()
+
             if payment_status == "оплачено":
                 continue
 
             found_any = True
 
-            num = escape_md(r[0])
-            name = escape_md(r[1])
-            kzt = parse_int(r[3])
-            rub = parse_int(r[4])
+            number = escape_md(
+                row[0] if len(row) > 0 else ""
+            )
+
+            position_name = escape_md(
+                row[1] if len(row) > 1 else ""
+            )
+
+            kzt = parse_int(
+                row[3] if len(row) > 3 else 0
+            )
+
+            rub = parse_int(
+                row[4] if len(row) > 4 else 0
+            )
 
             box_kzt += kzt
             box_rub += rub
 
-            box_lines.append(f"• {num} — {name}\n  {kzt} ₸ / {rub} ₽")
+            box_lines.append(
+                f"• {number} — {position_name}\n"
+                f"  {kzt} ₸ / {rub} ₽"
+            )
 
         if box_lines:
             total_kzt += box_kzt
@@ -495,50 +1153,82 @@ async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
             block = (
                 f"📦 **{safe_box_name}**\n"
                 + "\n".join(box_lines)
-                + f"\n⏰ Дедлайн: {safe_deadline}"
             )
+
+            if safe_deadline:
+                block += (
+                    f"\n⏰ Дедлайн: {safe_deadline}"
+                )
+
             box_blocks.append(block)
 
     if not found_any:
         await update.message.reply_text(
-            f"По юзернейму {safe_username} я ничего не нашла 🤍",
-            parse_mode="Markdown"
+            f"По юзернейму {safe_username} "
+            "я ничего не нашла 🤍",
+            parse_mode="Markdown",
         )
         return
 
-    positions_text = f"👤 **{safe_username}**\n\n"
-    positions_text += "\n\n".join(box_blocks)
+    positions_text = (
+        f"👤 **{safe_username}**\n\n"
+        + "\n\n".join(box_blocks)
+    )
 
-# сначала отправляем позиции (разбивая на части)
     for part in split_message(positions_text):
-        await update.message.reply_text(part, parse_mode="Markdown")
+        await update.message.reply_text(
+            part,
+            parse_mode="Markdown",
+        )
 
-# потом отдельным последним сообщением итог
     summary_text = ""
 
     if requisites_text:
-        summary_text += f"💳 **Реквизиты для оплаты:**\n{escape_md(requisites_text)}\n\n"
+        summary_text += (
+            "💳 **Реквизиты для оплаты:**\n"
+            f"{escape_md(requisites_text)}\n\n"
+        )
 
     summary_text += (
         "━━━━━━━━━━━━\n"
-        f"💰 **Итого к оплате:**\n"
+        "💰 **Итого к оплате:**\n"
         f"**{total_kzt} ₸ / {total_rub} ₽**"
     )
 
-    await update.message.reply_text(summary_text, parse_mode="Markdown")
+    await update.message.reply_text(
+        summary_text,
+        parse_mode="Markdown",
+    )
+
 
 # ================== MAIN ==================
+
 def main():
-    # ✅ поднимаем подписчиков из файла при старте
     load_subscribers()
 
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .build()
+    )
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(on_button))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_username))
+    app.add_handler(
+        CommandHandler("start", start)
+    )
+
+    app.add_handler(
+        CallbackQueryHandler(on_button)
+    )
+
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            handle_username,
+        )
+    )
 
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
