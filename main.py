@@ -589,11 +589,8 @@ async def start(
     ensure_subscriber(chat_id)
 
     await update.message.reply_text(
-        "Здравствуйте!
-
-"
-        "Я помогу посчитать сумму к оплате.
-"
+        "Здравствуйте!\n\n"
+        "Я помогу посчитать сумму к оплате.\n"
         "Выберите нужное действие в меню 👇",
         reply_markup=build_main_menu(chat_id),
     )
