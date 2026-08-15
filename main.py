@@ -2,6 +2,9 @@ import os
 import json
 import re
 import unicodedata
+import asyncio
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -191,6 +194,10 @@ CALC_BUTTON = "📦 Посчитать мою сумму"
 NOTIFY_BUTTON = "📣 Разослать уведомление"
 PAYMENT_REMINDER_BUTTON = "🔔 Напомнить об оплате"
 
+MSK_TZ = ZoneInfo("Europe/Moscow")
+AUTO_REMINDER_COLUMN = "Напоминание за 24ч отправлено"
+AUTO_REMINDER_INTERVAL_SECONDS = 600
+
 
 def build_main_menu(chat_id: int):
     """
@@ -210,6 +217,390 @@ def build_main_menu(chat_id: int):
         buttons,
         resize_keyboard=True,
         is_persistent=True,
+    )
+
+
+
+# ================== AUTO REMINDER 24H ==================
+
+def parse_deadline_msk(deadline_text: str):
+    """
+    Понимает дедлайн вида:
+    23:00 по ACT / 21:00 по МСК 01.02.2026
+    """
+    if not deadline_text:
+        return None
+
+    value = str(deadline_text).strip()
+
+    time_match = re.search(
+        r"(\d{1,2}:\d{2})\s*по\s*МСК",
+        value,
+        flags=re.IGNORECASE,
+    )
+    date_match = re.search(
+        r"(\d{2}\.\d{2}\.\d{4})",
+        value,
+    )
+
+    if not time_match or not date_match:
+        return None
+
+    try:
+        naive = datetime.strptime(
+            f"{date_match.group(1)} {time_match.group(1)}",
+            "%d.%m.%Y %H:%M",
+        )
+        return naive.replace(tzinfo=MSK_TZ)
+    except Exception:
+        return None
+
+
+def is_yes(value) -> bool:
+    return str(value or "").strip().lower() == "да"
+
+
+def ensure_auto_reminder_column():
+    """
+    Создаёт столбец для отметки автонапоминания, если его ещё нет.
+    """
+    registry_sheet = get_registry_sheet()
+    headers = registry_sheet.row_values(1)
+
+    if AUTO_REMINDER_COLUMN in headers:
+        return headers.index(AUTO_REMINDER_COLUMN) + 1
+
+    column_number = len(headers) + 1
+    registry_sheet.update_cell(
+        1,
+        column_number,
+        AUTO_REMINDER_COLUMN,
+    )
+    return column_number
+
+
+def get_due_boxes_for_auto_reminder():
+    """
+    Активные коробки, до дедлайна которых осталось <= 24 часов,
+    и по которым автонапоминание ещё не отправлялось.
+    """
+    registry_sheet = get_registry_sheet()
+    rows = registry_sheet.get_all_records()
+
+    now_msk = datetime.now(MSK_TZ)
+    due_boxes = []
+
+    for row_number, row in enumerate(rows, start=2):
+        if not is_yes(row.get("Активна", "")):
+            continue
+
+        if is_yes(row.get(AUTO_REMINDER_COLUMN, "")):
+            continue
+
+        deadline_text = row.get("Дедлайн оплаты", "")
+        deadline_dt = parse_deadline_msk(deadline_text)
+
+        if not deadline_dt:
+            continue
+
+        remaining = deadline_dt - now_msk
+
+        if timedelta(0) < remaining <= timedelta(hours=24):
+            due_boxes.append(
+                {
+                    "row_number": row_number,
+                    "name": row.get("Название коробки", ""),
+                    "link": row.get("Ссылка на таблицу", ""),
+                    "deadline": deadline_text,
+                }
+            )
+
+    return due_boxes
+
+
+def collect_unpaid_positions_for_boxes(boxes):
+    """
+    Собирает неоплаченные позиции только по коробкам,
+    попавшим в окно <= 24 часов до дедлайна.
+    """
+    unpaid_users = {}
+
+    for box in boxes:
+        box_name = box.get("name", "")
+        sheet_url = box.get("link", "")
+        deadline = box.get("deadline", "")
+
+        if not sheet_url:
+            continue
+
+        try:
+            box_sheet = gc.open_by_url(sheet_url).sheet1
+            rows = box_sheet.get_all_values()[1:]
+        except Exception as error:
+            print(f"Не удалось открыть коробку {box_name}: {error}")
+            continue
+
+        box_users = {}
+
+        for row in rows:
+            if len(row) < 3:
+                continue
+
+            username = normalize_username(row[2])
+
+            if not username:
+                continue
+
+            payment_status = (
+                str(row[5]).strip().lower()
+                if len(row) > 5
+                else ""
+            )
+
+            if payment_status == "оплачено":
+                continue
+
+            number = row[0] if len(row) > 0 else ""
+            position_name = row[1] if len(row) > 1 else ""
+            kzt = parse_int(row[3]) if len(row) > 3 else 0
+            rub = parse_int(row[4]) if len(row) > 4 else 0
+
+            if username not in box_users:
+                box_users[username] = {
+                    "positions": [],
+                    "total_kzt": 0,
+                    "total_rub": 0,
+                }
+
+            box_users[username]["positions"].append(
+                {
+                    "number": number,
+                    "name": position_name,
+                    "kzt": kzt,
+                    "rub": rub,
+                }
+            )
+            box_users[username]["total_kzt"] += kzt
+            box_users[username]["total_rub"] += rub
+
+        for username, box_data in box_users.items():
+            if username not in unpaid_users:
+                unpaid_users[username] = {
+                    "boxes": [],
+                    "total_kzt": 0,
+                    "total_rub": 0,
+                    "positions_count": 0,
+                }
+
+            unpaid_users[username]["boxes"].append(
+                {
+                    "name": box_name,
+                    "deadline": deadline,
+                    "positions": box_data["positions"],
+                    "total_kzt": box_data["total_kzt"],
+                    "total_rub": box_data["total_rub"],
+                }
+            )
+            unpaid_users[username]["total_kzt"] += box_data["total_kzt"]
+            unpaid_users[username]["total_rub"] += box_data["total_rub"]
+            unpaid_users[username]["positions_count"] += len(
+                box_data["positions"]
+            )
+
+    return unpaid_users
+
+
+def build_auto_payment_reminder_text(username, user_data):
+    safe_username = escape_md(username)
+
+    text = (
+        "⏰ **До дедлайна оплаты осталось меньше 24 часов!**\n\n"
+        f"По юзернейму **{safe_username}** "
+        "остались неоплаченные позиции:\n\n"
+    )
+
+    box_blocks = []
+
+    for box in user_data["boxes"]:
+        safe_box_name = escape_md(box["name"])
+        safe_deadline = escape_md(box["deadline"])
+
+        lines = []
+
+        for position in box["positions"]:
+            safe_number = escape_md(position["number"])
+            safe_name = escape_md(position["name"])
+
+            lines.append(
+                f"• {safe_number} — {safe_name}\n"
+                f"  {position['kzt']} ₸ / {position['rub']} ₽"
+            )
+
+        block = (
+            f"📦 **{safe_box_name}**\n"
+            + "\n".join(lines)
+        )
+
+        if safe_deadline:
+            block += f"\n⏰ Дедлайн: {safe_deadline}"
+
+        box_blocks.append(block)
+
+    text += "\n\n".join(box_blocks)
+
+    text += (
+        "\n\n━━━━━━━━━━━━\n"
+        "💰 **Итого к оплате:**\n"
+        f"**{user_data['total_kzt']} ₸ / "
+        f"{user_data['total_rub']} ₽**\n\n"
+        "Пожалуйста, оплатите позиции до дедлайна."
+    )
+
+    return text
+
+
+def mark_auto_reminder_sent(boxes):
+    if not boxes:
+        return
+
+    registry_sheet = get_registry_sheet()
+    reminder_column = ensure_auto_reminder_column()
+
+    for box in boxes:
+        registry_sheet.update_cell(
+            box["row_number"],
+            reminder_column,
+            "да",
+        )
+
+
+async def run_automatic_24h_payment_reminder(app):
+    """
+    Фоновая проверка каждые 10 минут.
+    """
+    while True:
+        try:
+            due_boxes = get_due_boxes_for_auto_reminder()
+
+            if due_boxes:
+                unpaid_users = collect_unpaid_positions_for_boxes(
+                    due_boxes
+                )
+                users_map = get_users_map()
+
+                sent_users = []
+                missing_users = []
+                failed_users = []
+
+                keyboard = build_box_notification_keyboard()
+
+                for username, user_data in sorted(
+                    unpaid_users.items()
+                ):
+                    target_chat_id = users_map.get(username)
+
+                    if not target_chat_id:
+                        missing_users.append(username)
+                        continue
+
+                    reminder_text = build_auto_payment_reminder_text(
+                        username,
+                        user_data,
+                    )
+
+                    try:
+                        reminder_parts = split_message(reminder_text)
+
+                        for index, part in enumerate(reminder_parts):
+                            is_last_part = (
+                                index == len(reminder_parts) - 1
+                            )
+
+                            await app.bot.send_message(
+                                chat_id=target_chat_id,
+                                text=part,
+                                parse_mode="Markdown",
+                                reply_markup=(
+                                    keyboard
+                                    if is_last_part
+                                    else None
+                                ),
+                                disable_web_page_preview=True,
+                            )
+
+                        sent_users.append(username)
+
+                    except Exception as error:
+                        failed_users.append(
+                            f"{username}: {error}"
+                        )
+                        print(
+                            f"Автонапоминание не отправлено "
+                            f"{username} ({target_chat_id}): {error}"
+                        )
+
+                # Ставим отметку после одной попытки, чтобы не было спама.
+                mark_auto_reminder_sent(due_boxes)
+
+                box_names = ", ".join(
+                    str(box.get("name", ""))
+                    for box in due_boxes
+                )
+
+                admin_text = (
+                    "⏰ **Автоматическое напоминание за 24 часа выполнено**\n\n"
+                    f"📦 Коробки: {escape_md(box_names)}\n"
+                    f"✅ Доставлено: **{len(sent_users)}**\n"
+                    f"❌ Нет Chat ID: **{len(missing_users)}**\n"
+                    f"⚠️ Ошибка отправки: **{len(failed_users)}**"
+                )
+
+                if missing_users:
+                    admin_text += (
+                        "\n\n❌ **Нет в листе «Пользователи»:**\n"
+                        + "\n".join(
+                            f"• {escape_md(username)}"
+                            for username in missing_users
+                        )
+                    )
+
+                if failed_users:
+                    admin_text += (
+                        "\n\n⚠️ **Не удалось отправить:**\n"
+                        + "\n".join(
+                            f"• {escape_md(item)}"
+                            for item in failed_users
+                        )
+                    )
+
+                try:
+                    for part in split_message(admin_text):
+                        await app.bot.send_message(
+                            chat_id=ADMIN_CHAT_ID,
+                            text=part,
+                            parse_mode="Markdown",
+                        )
+                except Exception as error:
+                    print(
+                        "Не удалось отправить админу отчёт "
+                        f"автонапоминания: {error}"
+                    )
+
+        except Exception as error:
+            print(
+                "Ошибка автоматического напоминания за 24 часа: "
+                f"{error}"
+            )
+
+        await asyncio.sleep(AUTO_REMINDER_INTERVAL_SECONDS)
+
+
+async def post_init(application):
+    """
+    Запускает фоновую проверку после старта бота.
+    """
+    application.create_task(
+        run_automatic_24h_payment_reminder(application)
     )
 
 
@@ -1353,6 +1744,7 @@ def main():
     app = (
         ApplicationBuilder()
         .token(BOT_TOKEN)
+        .post_init(post_init)
         .build()
     )
 
