@@ -3,6 +3,7 @@ import json
 import re
 import unicodedata
 import asyncio
+import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -196,7 +197,22 @@ PAYMENT_REMINDER_BUTTON = "🔔 Напомнить об оплате"
 
 MSK_TZ = ZoneInfo("Europe/Moscow")
 AUTO_REMINDER_COLUMN = "Напоминание за 24ч отправлено"
-AUTO_REMINDER_INTERVAL_SECONDS = 600
+AUTO_REMINDER_INTERVAL_SECONDS = 1800
+SHEETS_RETRY_ATTEMPTS = 5
+SHEETS_RETRY_BASE_SECONDS = 2
+
+
+def sheets_call_with_retry(func, *args, **kwargs):
+    """Повторяет запрос к Google Sheets при временной ошибке 429."""
+    for attempt in range(SHEETS_RETRY_ATTEMPTS):
+        try:
+            return func(*args, **kwargs)
+        except gspread.exceptions.APIError as error:
+            response = getattr(error, "response", None)
+            status_code = getattr(response, "status_code", None)
+            if status_code != 429 or attempt == SHEETS_RETRY_ATTEMPTS - 1:
+                raise
+            time.sleep(SHEETS_RETRY_BASE_SECONDS * (2 ** attempt))
 
 
 def build_main_menu(chat_id: int):
@@ -285,7 +301,7 @@ def get_due_boxes_for_auto_reminder():
     и по которым автонапоминание ещё не отправлялось.
     """
     registry_sheet = get_registry_sheet()
-    rows = registry_sheet.get_all_records()
+    rows = sheets_call_with_retry(registry_sheet.get_all_records)
 
     now_msk = datetime.now(MSK_TZ)
     due_boxes = []
@@ -335,7 +351,7 @@ def collect_unpaid_positions_for_boxes(boxes):
 
         try:
             box_sheet = gc.open_by_url(sheet_url).sheet1
-            rows = box_sheet.get_all_values()[1:]
+            rows = sheets_call_with_retry(box_sheet.get_all_values)[1:]
         except Exception as error:
             print(f"Не удалось открыть коробку {box_name}: {error}")
             continue
@@ -644,7 +660,7 @@ def get_users_sheet():
 
 def get_users_map():
     users_sheet = get_users_sheet()
-    rows = users_sheet.get_all_records()
+    rows = sheets_call_with_retry(users_sheet.get_all_records)
 
     users_map = {}
 
@@ -678,7 +694,7 @@ def save_user_to_sheet(username: str, chat_id: int):
         return
 
     users_sheet = get_users_sheet()
-    rows = users_sheet.get_all_values()
+    rows = sheets_call_with_retry(users_sheet.get_all_values)
 
     matched_rows = []
 
@@ -780,7 +796,7 @@ def build_box_notification_text(box):
 
 def collect_unpaid_positions():
     registry_sheet = get_registry_sheet()
-    registry_rows = registry_sheet.get_all_records()
+    registry_rows = sheets_call_with_retry(registry_sheet.get_all_records)
 
     unpaid_users = {}
 
@@ -1583,7 +1599,7 @@ async def handle_username(
 
         try:
             sheet = gc.open_by_url(sheet_url).sheet1
-            rows = sheet.get_all_values()[1:]
+            rows = sheets_call_with_retry(sheet.get_all_values)[1:]
 
         except Exception as error:
             print(
