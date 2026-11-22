@@ -16,6 +16,7 @@ from telegram import (
     InlineKeyboardMarkup,
     ReplyKeyboardMarkup,
 )
+from telegram.error import Forbidden, RetryAfter
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -194,6 +195,7 @@ def parse_chat_id(value):
 CALC_BUTTON = "📦 Посчитать мою сумму"
 NOTIFY_BUTTON = "📣 Разослать уведомление"
 PAYMENT_REMINDER_BUTTON = "🔔 Напомнить об оплате"
+OVERDUE_PAYMENT_BUTTON = "⏰ Разослать о просрочке оплаты"
 
 MSK_TZ = ZoneInfo("Europe/Moscow")
 AUTO_REMINDER_COLUMN = "Напоминание за 24ч отправлено"
@@ -228,6 +230,8 @@ def build_main_menu(chat_id: int):
     if chat_id == ADMIN_CHAT_ID:
         buttons.append([NOTIFY_BUTTON])
         buttons.append([PAYMENT_REMINDER_BUTTON])
+        if chat_id > 0:
+            buttons.append([OVERDUE_PAYMENT_BUTTON])
 
     return ReplyKeyboardMarkup(
         buttons,
@@ -334,11 +338,8 @@ def get_due_boxes_for_auto_reminder():
     return due_boxes
 
 
-def collect_unpaid_positions_for_boxes(boxes):
-    """
-    Собирает неоплаченные позиции только по коробкам,
-    попавшим в окно <= 24 часов до дедлайна.
-    """
+def collect_unpaid_positions_for_boxes(boxes, read_errors=None):
+    """Собирает неоплаченные позиции из переданных коробок."""
     unpaid_users = {}
 
     for box in boxes:
@@ -347,13 +348,17 @@ def collect_unpaid_positions_for_boxes(boxes):
         deadline = box.get("deadline", "")
 
         if not sheet_url:
+            if read_errors is not None:
+                read_errors.append(f"{box_name}: нет ссылки на таблицу")
             continue
 
         try:
-            box_sheet = gc.open_by_url(sheet_url).sheet1
+            box_sheet = sheets_call_with_retry(lambda: gc.open_by_url(sheet_url).sheet1)
             rows = sheets_call_with_retry(box_sheet.get_all_values)[1:]
         except Exception as error:
             print(f"Не удалось открыть коробку {box_name}: {error}")
+            if read_errors is not None:
+                read_errors.append(f"{box_name}: {error}")
             continue
 
         box_users = {}
@@ -986,6 +991,213 @@ def build_payment_preview(unpaid_users, users_map):
     return text
 
 
+# ================== OVERDUE PAYMENT NOTICE ==================
+
+def parse_delivery_deadline(deadline_text):
+    deadline = parse_deadline_msk(deadline_text)
+    if deadline is not None:
+        return deadline
+
+    value = str(deadline_text or "").strip()
+    date_match = re.search(r"\b\d{2}\.\d{2}\.\d{4}\b", value)
+    time_match = re.search(r"(\d{1,2}:\d{2})\s*по\s*(?:АСТ|ACT)\b", value, re.IGNORECASE)
+    if not time_match and re.fullmatch(r"\d{2}\.\d{2}\.\d{4}\s+\d{1,2}:\d{2}|\d{1,2}:\d{2}\s+\d{2}\.\d{2}\.\d{4}", value):
+        time_match = re.search(r"(\d{1,2}:\d{2})", value)
+    if not date_match or not time_match:
+        return None
+
+    try:
+        deadline = datetime.strptime(f"{date_match[0]} {time_match[1]}", "%d.%m.%Y %H:%M")
+    except ValueError:
+        return None
+    return deadline.replace(tzinfo=ZoneInfo("Asia/Almaty"))
+
+
+def overdue_delivery_data(cutoff):
+    registry_sheet = sheets_call_with_retry(get_registry_sheet)
+    rows = sheets_call_with_retry(registry_sheet.get_all_records)
+    boxes = []
+    for row in rows:
+        deadline_text = row.get("Дедлайн оплаты", "")
+        deadline = parse_delivery_deadline(deadline_text)
+        if deadline is None or deadline > cutoff:
+            continue
+        boxes.append({
+            "name": row.get("Название коробки") or "Коробка без названия",
+            "link": str(row.get("Ссылка на таблицу") or "").strip(),
+            "deadline": deadline_text,
+        })
+
+    read_errors = []
+    unpaid_users = collect_unpaid_positions_for_boxes(boxes, read_errors)
+    users_map = get_users_map() if unpaid_users else {}
+    return unpaid_users, users_map, read_errors
+
+
+def overdue_delivery_text(user_data):
+    lines = ["⏰ Вы просрочили оплату доставки.", "", "Разборы, по которым оплата не отмечена:"]
+    for box in user_data["boxes"]:
+        lines.extend(("", f"📦 {box['name']}"))
+        lines.extend(
+            f"• {position['number']} — {position['name']}"
+            for position in box["positions"]
+        )
+
+    lines.extend((
+        "",
+        "Если вы оплатили до дедлайна и видите это сообщение, значит бот не принял "
+        "вашу оплату. Пожалуйста, отправьте комментарий с чеком ещё раз под постом "
+        "оплаты нужной коробки. После дедлайна администратор сам проверит оплату "
+        "и отметит её в таблице.",
+        "",
+        "Если вы оплатили после дедлайна или ещё не оплатили доставку, "
+        "нужно оплатить штраф за каждый разбор. Штраф за один разбор — 200 ₸ / 44 ₽.",
+        "",
+        "⚠️ Бот считает только стоимость доставки. Прибавьте штраф к сумме самостоятельно. "
+        "Если сумма в чеке не совпадёт с суммой доставки и штрафа, оплату не примут.",
+    ))
+    return "\n".join(lines)
+
+
+def overdue_read_errors_text(read_errors):
+    if not read_errors:
+        return ""
+    return "\n\n⚠️ Не удалось проверить коробки:\n" + "\n".join(f"• {error}" for error in read_errors)
+
+
+async def send_overdue_message(bot, chat_id, text, reply_markup=None):
+    options = {
+        "chat_id": chat_id,
+        "text": text,
+        "reply_markup": reply_markup,
+        "disable_web_page_preview": True,
+    }
+    try:
+        await bot.send_message(**options)
+    except RetryAfter as error:
+        await asyncio.sleep(error.retry_after + 1)
+        await bot.send_message(**options)
+
+
+def overdue_delivery_error(error):
+    detail = str(error).strip()
+    detail_lower = detail.lower()
+    if "blocked by the user" in detail_lower:
+        return "пользователь заблокировал бота"
+    if "chat not found" in detail_lower or "can't initiate conversation" in detail_lower:
+        return "Telegram не нашёл личный чат с пользователем"
+    if "user is deactivated" in detail_lower:
+        return "аккаунт пользователя деактивирован"
+    if isinstance(error, RetryAfter):
+        return "Telegram ограничил частоту отправки"
+    if isinstance(error, Forbidden):
+        return f"Telegram запретил отправку ({detail})"
+    return detail or type(error).__name__
+
+
+async def preview_overdue_delivery(message, context):
+    context.user_data.pop("overdue_delivery_preview", None)
+    cutoff = datetime.now(MSK_TZ)
+    try:
+        unpaid_users, users_map, read_errors = overdue_delivery_data(cutoff)
+    except Exception as error:
+        await message.reply_text(f"❌ Не удалось подготовить рассылку: {error}")
+        return
+
+    unavailable = overdue_read_errors_text(read_errors)
+    if not unpaid_users:
+        summary = (
+            "В проверенных коробках с истёкшим дедлайном неоплаченных позиций не найдено."
+            if read_errors else "Нет неоплаченных позиций в коробках с истёкшим дедлайном."
+        )
+        for part in split_message(summary + unavailable):
+            await message.reply_text(part, reply_markup=build_main_menu(message.chat_id))
+        return
+
+    boxes_with_unpaid_positions = sorted({
+        (box["name"], box["deadline"])
+        for user in unpaid_users.values()
+        for box in user["boxes"]
+    })
+    box_lines = "\n".join(
+        f"• {name} — {deadline}"
+        for name, deadline in boxes_with_unpaid_positions
+    )
+    available = sum(username in users_map for username in unpaid_users)
+    preview = (
+        "⏰ Рассылка о просрочке оплаты доставки\n\n"
+        f"Получателей: {len(unpaid_users)}\n"
+        f"Есть личный чат: {available}\n"
+        f"Нет Chat ID: {len(unpaid_users) - available}\n\n"
+        "Коробки с истёкшим дедлайном и неоплаченными разборами:\n"
+        + box_lines + unavailable
+    )
+    for part in split_message(preview):
+        await message.reply_text(part, reply_markup=build_main_menu(message.chat_id))
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Разослать уведомления", callback_data="overdue_delivery_send")],
+        [InlineKeyboardButton("❌ Отмена", callback_data="overdue_delivery_cancel")],
+    ])
+    confirmation = await message.reply_text("Отправить уведомления?", reply_markup=keyboard)
+    context.user_data["overdue_delivery_preview"] = (confirmation.message_id, cutoff)
+
+
+async def broadcast_overdue_delivery(message, context, cutoff):
+    try:
+        unpaid_users, users_map, read_errors = overdue_delivery_data(cutoff)
+    except Exception as error:
+        await message.reply_text(f"❌ Рассылка не запущена: {error}")
+        return
+
+    sent = []
+    failed = []
+    partial = []
+    calc_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(CALC_BUTTON, callback_data="calc")]])
+    for username, user_data in sorted(unpaid_users.items()):
+        target_chat_id = users_map.get(username)
+        if not target_chat_id:
+            failed.append(f"{username} — нет Chat ID в листе «Пользователи»")
+            continue
+
+        parts = split_message(overdue_delivery_text(user_data))
+        sent_parts = 0
+        try:
+            for index, part in enumerate(parts):
+                keyboard = calc_keyboard if index == 0 else None
+                await send_overdue_message(context.bot, target_chat_id, part, keyboard)
+                sent_parts += 1
+                await asyncio.sleep(0.05)
+        except Exception as error:
+            reason = overdue_delivery_error(error)
+            if sent_parts:
+                partial.append(f"{username} — {sent_parts} из {len(parts)} частей, {reason}")
+            else:
+                failed.append(f"{username} — {reason}")
+        else:
+            sent.append(username)
+
+    report = [
+        "📋 Отчёт о рассылке о просрочке оплаты доставки",
+        "",
+        f"✅ Доставлено: {len(sent)}",
+        f"❌ Не доставлено: {len(failed)}",
+        f"⚠️ Доставлено частично: {len(partial)}",
+    ]
+    if not unpaid_users:
+        report.extend(("", "В проверенных коробках неоплаченных позиций не найдено."))
+    for heading, recipients in (
+        ("✅ Доставлено", sent),
+        ("❌ Не доставлено", failed),
+        ("⚠️ Доставлено частично", partial),
+    ):
+        if recipients:
+            report.extend(("", heading, *(f"• {recipient}" for recipient in recipients)))
+
+    for part in split_message("\n".join(report) + overdue_read_errors_text(read_errors)):
+        await send_overdue_message(context.bot, message.chat_id, part)
+
+
 # ================== START ==================
 
 async def start(
@@ -1355,6 +1567,23 @@ async def on_button(
                 parse_mode="Markdown",
             )
 
+    elif query.data in ("overdue_delivery_send", "overdue_delivery_cancel"):
+        if chat_id != ADMIN_CHAT_ID or update.effective_chat.type != "private":
+            return
+
+        preview = context.user_data.get("overdue_delivery_preview")
+        if not preview or preview[0] != query.message.message_id:
+            await query.message.reply_text("Эта рассылка уже обработана. Откройте новую через меню.")
+            return
+
+        _, cutoff = context.user_data.pop("overdue_delivery_preview")
+        if query.data == "overdue_delivery_cancel":
+            await query.message.reply_text("Рассылка отменена.")
+            return
+
+        await query.message.reply_text("⏳ Перепроверяю оплаты и отправляю уведомления.")
+        await broadcast_overdue_delivery(query.message, context, cutoff)
+
     elif query.data == "cancel":
         await query.message.reply_text(
             "❌ Действие отменено"
@@ -1433,6 +1662,11 @@ async def handle_username(
             "Выберите коробку для отправки уведомления:",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
+        return
+
+    if message_text == OVERDUE_PAYMENT_BUTTON:
+        if chat_id == ADMIN_CHAT_ID and update.effective_chat.type == "private":
+            await preview_overdue_delivery(update.message, context)
         return
 
     # Постоянная админская кнопка ручного напоминания об оплате
