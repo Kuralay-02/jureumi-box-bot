@@ -1,3 +1,11 @@
+from bot_io import (
+    ChatUpdateProcessor,
+    append_once,
+    configure_client,
+    operation_key,
+    run_sheets,
+    telegram_call,
+)
 import os
 import json
 import re
@@ -238,7 +246,6 @@ def build_main_menu(chat_id: int):
         resize_keyboard=True,
         is_persistent=True,
     )
-
 
 
 # ================== AUTO REMINDER 24H ==================
@@ -495,124 +502,85 @@ def mark_auto_reminder_sent(boxes):
         )
 
 
+def automatic_reminder_targets(boxes):
+    errors = []
+    users = collect_unpaid_positions_for_boxes(boxes, errors)
+    if errors:
+        raise RuntimeError("Не удалось прочитать коробки: " + "; ".join(errors))
+    book = get_registry_spreadsheet()
+    try:
+        journal = book.worksheet("Журнал автонапоминаний")
+    except gspread.WorksheetNotFound:
+        journal = book.add_worksheet(title="Журнал автонапоминаний", rows=2000, cols=3)
+        journal.append_row(["Дата", "Получатель", "ID операции"])
+    values = journal.get_all_values()
+    delivered = {row[2] for row in values[1:] if len(row) > 2}
+    return users, get_users_map(), journal, delivered
+
+
 async def run_automatic_24h_payment_reminder(app):
-    """
-    Фоновая проверка каждые 10 минут.
-    """
     while True:
         try:
-            due_boxes = get_due_boxes_for_auto_reminder()
-
+            due_boxes = await run_sheets(get_due_boxes_for_auto_reminder)
             if due_boxes:
-                unpaid_users = collect_unpaid_positions_for_boxes(
-                    due_boxes
+                users, chat_ids, journal, delivered = await run_sheets(
+                    automatic_reminder_targets, due_boxes
                 )
-                users_map = get_users_map()
-
-                sent_users = []
-                missing_users = []
-                failed_users = []
-
-                keyboard = build_box_notification_keyboard()
-
-                for username, user_data in sorted(
-                    unpaid_users.items()
-                ):
-                    target_chat_id = users_map.get(username)
-
-                    if not target_chat_id:
-                        missing_users.append(username)
-                        continue
-
-                    reminder_text = build_auto_payment_reminder_text(
-                        username,
-                        user_data,
+                failures = []
+                sent = 0
+                for username, user_data in sorted(users.items()):
+                    key = operation_key(
+                        "reminder",
+                        {
+                            "username": username,
+                            "boxes": sorted(
+                                (box["link"], box["deadline"]) for box in due_boxes
+                            ),
+                        },
                     )
-
+                    if key + "/0" in delivered:
+                        continue
+                    chat_id = chat_ids.get(username)
+                    if not chat_id:
+                        failures.append(
+                            f"{username}: пользователь ещё не запустил бота"
+                        )
+                        continue
                     try:
-                        reminder_parts = split_message(reminder_text)
-
-                        for index, part in enumerate(reminder_parts):
-                            is_last_part = (
-                                index == len(reminder_parts) - 1
-                            )
-
-                            await app.bot.send_message(
-                                chat_id=target_chat_id,
+                        parts = split_message(
+                            build_auto_payment_reminder_text(username, user_data)
+                        )
+                        for index, part in enumerate(parts):
+                            await telegram_call(
+                                app.bot.send_message,
+                                chat_id=chat_id,
                                 text=part,
                                 parse_mode="Markdown",
+                                disable_web_page_preview=True,
                                 reply_markup=(
-                                    keyboard
-                                    if is_last_part
+                                    build_box_notification_keyboard()
+                                    if index == len(parts) - 1
                                     else None
                                 ),
-                                disable_web_page_preview=True,
                             )
-
-                        sent_users.append(username)
-
+                        await run_sheets(
+                            append_once,
+                            journal,
+                            [[datetime.now(MSK_TZ).isoformat(), username]],
+                            key,
+                        )
+                        sent += 1
                     except Exception as error:
-                        failed_users.append(
-                            f"{username}: {error}"
-                        )
-                        print(
-                            f"Автонапоминание не отправлено "
-                            f"{username} ({target_chat_id}): {error}"
-                        )
-
-                # Ставим отметку после одной попытки, чтобы не было спама.
-                mark_auto_reminder_sent(due_boxes)
-
-                box_names = ", ".join(
-                    str(box.get("name", ""))
-                    for box in due_boxes
-                )
-
-                admin_text = (
-                    "⏰ **Автоматическое напоминание за 24 часа выполнено**\n\n"
-                    f"📦 Коробки: {escape_md(box_names)}\n"
-                    f"✅ Доставлено: **{len(sent_users)}**\n"
-                    f"❌ Нет Chat ID: **{len(missing_users)}**\n"
-                    f"⚠️ Ошибка отправки: **{len(failed_users)}**"
-                )
-
-                if missing_users:
-                    admin_text += (
-                        "\n\n❌ **Нет в листе «Пользователи»:**\n"
-                        + "\n".join(
-                            f"• {escape_md(username)}"
-                            for username in missing_users
-                        )
-                    )
-
-                if failed_users:
-                    admin_text += (
-                        "\n\n⚠️ **Не удалось отправить:**\n"
-                        + "\n".join(
-                            f"• {escape_md(item)}"
-                            for item in failed_users
-                        )
-                    )
-
-                try:
-                    for part in split_message(admin_text):
-                        await app.bot.send_message(
-                            chat_id=ADMIN_CHAT_ID,
-                            text=part,
-                            parse_mode="Markdown",
-                        )
-                except Exception as error:
-                    print(
-                        "Не удалось отправить админу отчёт "
-                        f"автонапоминания: {error}"
-                    )
-
+                        failures.append(f"{username}: {error}")
+                if not failures:
+                    await run_sheets(mark_auto_reminder_sent, due_boxes)
+                report = f"Автонапоминание об оплате. Отправлено: {sent}. Ожидают повторной попытки: {len(failures)}."
+                if failures:
+                    report += "\n" + "\n".join(failures)
+                for part in split_message(report):
+                    await telegram_call(app.bot.send_message, ADMIN_CHAT_ID, part)
         except Exception as error:
-            print(
-                "Ошибка автоматического напоминания за 24 часа: "
-                f"{error}"
-            )
-
+            print(f"Ошибка автоматического напоминания за 24 часа: {error}")
         await asyncio.sleep(AUTO_REMINDER_INTERVAL_SECONDS)
 
 
@@ -648,7 +616,7 @@ creds = Credentials.from_service_account_info(
     scopes=scopes,
 )
 
-gc = gspread.authorize(creds)
+gc = configure_client(gspread.authorize(creds))
 
 
 def get_registry_spreadsheet():
@@ -1073,10 +1041,10 @@ async def send_overdue_message(bot, chat_id, text, reply_markup=None):
         "disable_web_page_preview": True,
     }
     try:
-        await bot.send_message(**options)
+        await telegram_call(bot.send_message, **options)
     except RetryAfter as error:
         await asyncio.sleep(error.retry_after + 1)
-        await bot.send_message(**options)
+        await telegram_call(bot.send_message, **options)
 
 
 def overdue_delivery_error(error):
@@ -1099,7 +1067,9 @@ async def preview_overdue_delivery(message, context):
     context.user_data.pop("overdue_delivery_preview", None)
     cutoff = datetime.now(MSK_TZ)
     try:
-        unpaid_users, users_map, read_errors = overdue_delivery_data(cutoff)
+        unpaid_users, users_map, read_errors = await run_sheets(
+            overdue_delivery_data, cutoff
+        )
     except Exception as error:
         await message.reply_text(f"❌ Не удалось подготовить рассылку: {error}")
         return
@@ -1145,7 +1115,9 @@ async def preview_overdue_delivery(message, context):
 
 async def broadcast_overdue_delivery(message, context, cutoff):
     try:
-        unpaid_users, users_map, read_errors = overdue_delivery_data(cutoff)
+        unpaid_users, users_map, read_errors = await run_sheets(
+            overdue_delivery_data, cutoff
+        )
     except Exception as error:
         await message.reply_text(f"❌ Рассылка не запущена: {error}")
         return
@@ -1244,7 +1216,7 @@ async def on_button(
             return
 
         try:
-            boxes = get_new_boxes_from_registry()
+            boxes = await run_sheets(get_new_boxes_from_registry)
 
         except Exception as error:
             await query.message.reply_text(
@@ -1327,7 +1299,8 @@ async def on_button(
 
         for subscriber_id in list(SUBSCRIBERS):
             try:
-                await context.bot.send_message(
+                await telegram_call(
+                    context.bot.send_message,
                     chat_id=subscriber_id,
                     text=text,
                     reply_markup=keyboard,
@@ -1364,8 +1337,8 @@ async def on_button(
         )
 
         try:
-            unpaid_users = collect_unpaid_positions()
-            users_map = get_users_map()
+            unpaid_users = await run_sheets(collect_unpaid_positions)
+            users_map = await run_sheets(get_users_map)
 
         except gspread.WorksheetNotFound:
             await query.message.reply_text(
@@ -1440,8 +1413,8 @@ async def on_button(
         )
 
         try:
-            unpaid_users = collect_unpaid_positions()
-            users_map = get_users_map()
+            unpaid_users = await run_sheets(collect_unpaid_positions)
+            users_map = await run_sheets(get_users_map)
 
         except Exception as error:
             await query.message.reply_text(
@@ -1484,15 +1457,12 @@ async def on_button(
                         index == len(reminder_parts) - 1
                     )
 
-                    await context.bot.send_message(
+                    await telegram_call(
+                        context.bot.send_message,
                         chat_id=target_chat_id,
                         text=part,
                         parse_mode="Markdown",
-                        reply_markup=(
-                            keyboard
-                            if is_last_part
-                            else None
-                        ),
+                        reply_markup=(keyboard if is_last_part else None),
                         disable_web_page_preview=True,
                     )
 
@@ -1618,7 +1588,7 @@ async def handle_username(
             return
 
         try:
-            boxes = get_new_boxes_from_registry()
+            boxes = await run_sheets(get_new_boxes_from_registry)
 
         except Exception as error:
             await update.message.reply_text(
@@ -1681,8 +1651,8 @@ async def handle_username(
         )
 
         try:
-            unpaid_users = collect_unpaid_positions()
-            users_map = get_users_map()
+            unpaid_users = await run_sheets(collect_unpaid_positions)
+            users_map = await run_sheets(get_users_map)
 
         except gspread.WorksheetNotFound:
             await update.message.reply_text(
@@ -1762,7 +1732,7 @@ async def handle_username(
         return
 
     try:
-        save_user_to_sheet(username, chat_id)
+        await run_sheets(save_user_to_sheet, username, chat_id)
 
     except Exception as error:
         print(
@@ -1775,8 +1745,8 @@ async def handle_username(
     )
 
     try:
-        registry = get_registry_sheet()
-        registry_rows = registry.get_all_records()
+        registry = await run_sheets(get_registry_sheet)
+        registry_rows = await run_sheets(registry.get_all_records)
 
     except Exception as error:
         await update.message.reply_text(
@@ -1832,7 +1802,7 @@ async def handle_username(
             continue
 
         try:
-            sheet = gc.open_by_url(sheet_url).sheet1
+            sheet = await run_sheets(lambda: gc.open_by_url(sheet_url).sheet1)
             rows = sheets_call_with_retry(sheet.get_all_values)[1:]
 
         except Exception as error:
@@ -1840,7 +1810,9 @@ async def handle_username(
                 f"Не удалось открыть коробку "
                 f"{box_name}: {error}"
             )
-            continue
+            raise RuntimeError(
+                f"Не удалось прочитать коробку «{box_name}». Расчёт остановлен."
+            ) from error
 
         unpaid_lines = []
         paid_lines = []
@@ -1993,12 +1965,32 @@ async def handle_username(
 
 # ================== MAIN ==================
 
+
+async def handle_bot_error(update, context):
+    import logging
+
+    error = context.error
+    logging.error(
+        "Ошибка обработки сообщения", exc_info=(type(error), error, error.__traceback__)
+    )
+    if update and update.effective_chat and update.effective_chat.type == "private":
+        try:
+            await telegram_call(
+                context.bot.send_message,
+                update.effective_chat.id,
+                "Не удалось выполнить действие из-за технической ошибки. Попробуйте ещё раз через минуту.",
+            )
+        except Exception:
+            logging.exception("Не удалось отправить сообщение об ошибке")
+
+
 def main():
     load_subscribers()
 
     app = (
         ApplicationBuilder()
         .token(BOT_TOKEN)
+        .concurrent_updates(ChatUpdateProcessor())
         .post_init(post_init)
         .build()
     )
@@ -2018,6 +2010,7 @@ def main():
         )
     )
 
+    app.add_error_handler(handle_bot_error)
     app.run_polling()
 
 
